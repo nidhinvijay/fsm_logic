@@ -44,7 +44,8 @@ export const onPaperEntryOpportunity = (
     return 'NONE';
   }
 
-  if (cumPnl >= 0) {
+  // --- ENTRY RULE: allow live only if cumPnl > 0 (strictly positive) ---
+  if (cumPnl > 0) {
     // allowed to trade live
     if (live.state === LiveState.POSITION) {
       // already in a position, keep it
@@ -62,7 +63,7 @@ export const onPaperEntryOpportunity = (
     live.position.openedAt = nowTs;
     live.lockUntilTs = undefined;
 
-    logState('Live OPEN_POSITION due to non-negative cumPnl', {
+    logState('Live OPEN_POSITION due to positive cumPnl', {
       symbolId: live.symbolId,
       cumPnl,
       nowTs,
@@ -71,24 +72,33 @@ export const onPaperEntryOpportunity = (
     return 'OPEN_POSITION';
   }
 
-  // cumPnl < 0  → close live and lock until end of this window
-  if (live.state === LiveState.POSITION) {
-    live.position.isOpen = false;
-    live.position.entryPrice = null;
-    live.position.openedAt = null;
+  // --- EXIT RULE: cumPnl <= 0 ---
+  // If there is an open live position, close it and lock until end of this paper window.
+  // If there is no position, do nothing (no new lock).
+  const hadPosition = live.state === LiveState.POSITION && live.position.isOpen;
+  if (!hadPosition) {
+    logState('Live cumPnl <= 0 but no open position; leaving live state unchanged', {
+      symbolId: live.symbolId,
+      cumPnl,
+      nowTs,
+    });
+    return 'NONE';
   }
+
+  live.position.isOpen = false;
+  live.position.entryPrice = null;
+  live.position.openedAt = null;
 
   live.state = LiveState.LOCKED;
   live.lockUntilTs = paperWindowEndTs;
 
-  logState('Live CLOSE_POSITION and LOCK due to negative cumPnl', {
+  logState('Live CLOSE_POSITION and LOCK due to non-positive cumPnl', {
     symbolId: live.symbolId,
     cumPnl,
     nowTs,
     lockUntilTs: paperWindowEndTs,
   });
 
-  // we return CLOSE_POSITION only if we actually had a position
   return 'CLOSE_POSITION';
 };
 
@@ -106,4 +116,74 @@ export const onLiveTick = (live: LiveContext, nowTs: number): void => {
       nowTs,
     });
   }
+};
+
+// Immediate exit helper: call on each tick with current cumPnl.
+// If cumPnl <= 0 and a live position is open, we close immediately
+// and lock for 60 seconds from now.
+export const forceExitIfCumPnlNonPositive = (
+  live: LiveContext,
+  cumPnl: number,
+  nowTs: number,
+): LiveAction => {
+  if (cumPnl > 0) return 'NONE';
+  if (live.state !== LiveState.POSITION || !live.position.isOpen) {
+    return 'NONE';
+  }
+
+  live.position.isOpen = false;
+  live.position.entryPrice = null;
+  live.position.openedAt = null;
+
+  live.state = LiveState.LOCKED;
+  live.lockUntilTs = nowTs + 60_000;
+
+  logState('Live FORCE CLOSE due to non-positive cumPnl', {
+    symbolId: live.symbolId,
+    cumPnl,
+    nowTs,
+    lockUntilTs: live.lockUntilTs,
+  });
+
+  return 'CLOSE_POSITION';
+};
+
+// Try to open a live position based on current cumPnl and time.
+// Used when paper is already in a position and live is IDLE.
+export const tryOpenLiveFromPaperPosition = (
+  live: LiveContext,
+  cumPnl: number,
+  nowTs: number,
+): LiveAction => {
+  // require strictly positive cumPnl
+  if (cumPnl <= 0) return 'NONE';
+
+  // if locked and lock not expired, do nothing
+  if (
+    live.state === LiveState.LOCKED &&
+    live.lockUntilTs != null &&
+    nowTs < live.lockUntilTs
+  ) {
+    return 'NONE';
+  }
+
+  // already in live position
+  if (live.state === LiveState.POSITION && live.position.isOpen) {
+    return 'NONE';
+  }
+
+  // open live position
+  live.state = LiveState.POSITION;
+  live.position.isOpen = true;
+  live.position.entryPrice = null; // caller sets actual entry
+  live.position.openedAt = nowTs;
+  live.lockUntilTs = undefined;
+
+  logState('Live OPEN_POSITION from paper position and positive cumPnl', {
+    symbolId: live.symbolId,
+    cumPnl,
+    nowTs,
+  });
+
+  return 'OPEN_POSITION';
 };

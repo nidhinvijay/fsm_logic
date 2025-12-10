@@ -75,8 +75,10 @@
     <h1>BTCUSD Paper & Live FSM Demo</h1>
 
     <div class="card">
-      <h2>Auto Tick Control</h2>
+      <h2>Feed & Auto Tick Control</h2>
       <p>
+        <strong>Feed Mode:</strong>
+        <span id="feedMode">-</span> |
         <strong>Current LTP:</strong>
         <span id="currentPrice">-</span> |
         <strong>Auto Mode:</strong>
@@ -86,6 +88,10 @@
         Start / Reset Price:
         <input id="startPrice" type="number" step="0.1" value="100" />
       </label>
+      <div style="margin-top: 8px">
+        <button onclick="setFeedMode('DELTA')">Use Delta Live Feed</button>
+        <button onclick="setFeedMode('SIM')">Use SIM / Manual</button>
+      </div>
       <div style="margin-top: 8px">
         <button onclick="setAuto('UP')">Auto UP (+0.5 / sec)</button>
         <button onclick="setAuto('DOWN')">Auto DOWN (-0.5 / sec)</button>
@@ -116,7 +122,7 @@
         <span id="cumPnlTotal" class="pnl-positive">0.00</span>
       </p>
       <p style="font-size: 12px; color: #666;">
-        This is sir's "Cumulate PnL" across both LONG and SHORT paper engines.
+        This is total "Cumulate PnL" across both LONG and SHORT paper engines.
       </p>
     </div>
 
@@ -128,6 +134,10 @@
           <strong>Position:</strong>
           <span id="paperLongPositionInfo">No position</span>
         </p>
+        <p>
+          <strong>Cum PnL (live):</strong>
+          <span id="paperLongCumPnl">0.00</span>
+        </p>
         <p><strong>Triggers / Stops:</strong></p>
         <pre id="paperLongThresholds">-</pre>
       </div>
@@ -138,6 +148,10 @@
         <p>
           <strong>Position:</strong>
           <span id="paperShortPositionInfo">No position</span>
+        </p>
+        <p>
+          <strong>Cum PnL (live):</strong>
+          <span id="paperShortCumPnl">0.00</span>
         </p>
         <p><strong>Triggers / Stops:</strong></p>
         <pre id="paperShortThresholds">-</pre>
@@ -199,6 +213,11 @@
     </div>
 
     <div class="card">
+      <h2>FSM Logs</h2>
+      <pre id="fsmLogs">-</pre>
+    </div>
+
+    <div class="card">
       <h2>Raw State JSON</h2>
       <pre id="rawState">-</pre>
     </div>
@@ -208,6 +227,14 @@
         const res = await fetch('/state');
         const data = await res.json();
         renderState(data);
+      }
+
+      async function fetchLogs() {
+        const res = await fetch('/logs');
+        const data = await res.json();
+        const logs = Array.isArray(data.logs) ? data.logs : [];
+        const pre = document.getElementById('fsmLogs');
+        pre.textContent = logs.join('\n') || '-';
       }
 
       async function sendSignal(side) {
@@ -243,7 +270,7 @@
         const startPriceInput = document.getElementById('startPrice');
         const ltp = parseFloat(startPriceInput.value);
 
-        if (mode === 'PAUSE' && !Number.isNaN(ltp)) {
+        if (!Number.isNaN(ltp)) {
           body.ltp = ltp;
         }
 
@@ -255,14 +282,23 @@
 
         const data = await res.json();
         renderState(data.state);
-        document.getElementById('currentPrice').textContent =
-          data.currentPrice ?? '-';
-        document.getElementById('autoMode').textContent =
-          data.autoMode ?? mode;
+      }
+
+      async function setFeedMode(mode) {
+        const res = await fetch('/feed-mode', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode }),
+        });
+        const data = await res.json();
+        renderState(data.state);
       }
 
       function renderState(state) {
         if (!state) return;
+
+        const feedMode = state.feedMode || 'DELTA';
+        document.getElementById('feedMode').textContent = feedMode;
 
         document.getElementById('currentPrice').textContent =
           state.currentPrice ?? '-';
@@ -294,9 +330,19 @@
           savedBUYLTP: pLong.savedBUYLTP,
           buyEntryTrigger: pLong.buyEntryTrigger,
           buyStop: pLong.buyStop,
+          realizedCumPnl: pLong.realizedCumPnl,
+          unrealizedPnl: pLong.unrealizedPnl,
         };
         document.getElementById('paperLongThresholds').textContent =
           JSON.stringify(longThresh, null, 2);
+
+        const longCumEl = document.getElementById('paperLongCumPnl');
+        const longCum =
+          typeof pLong.cumPnl === 'number' ? pLong.cumPnl : 0;
+        longCumEl.textContent = longCum.toFixed(2);
+        longCumEl.classList.remove('pnl-positive', 'pnl-negative');
+        if (longCum > 0) longCumEl.classList.add('pnl-positive');
+        else if (longCum < 0) longCumEl.classList.add('pnl-negative');
 
         // Paper SHORT
         const pShort = state.paperShort || {};
@@ -313,9 +359,19 @@
           savedSELLLTP: pShort.savedSELLLTP,
           sellEntryTrigger: pShort.sellEntryTrigger,
           sellStop: pShort.sellStop,
+           realizedCumPnl: pShort.realizedCumPnl,
+           unrealizedPnl: pShort.unrealizedPnl,
         };
         document.getElementById('paperShortThresholds').textContent =
           JSON.stringify(shortThresh, null, 2);
+
+        const shortCumEl = document.getElementById('paperShortCumPnl');
+        const shortCum =
+          typeof pShort.cumPnl === 'number' ? pShort.cumPnl : 0;
+        shortCumEl.textContent = shortCum.toFixed(2);
+        shortCumEl.classList.remove('pnl-positive', 'pnl-negative');
+        if (shortCum > 0) shortCumEl.classList.add('pnl-positive');
+        else if (shortCum < 0) shortCumEl.classList.add('pnl-negative');
 
         // Live LONG
         renderLiveSide('Long', state.liveLong);
@@ -437,7 +493,9 @@
       }
 
       setInterval(fetchState, 2000);
+      setInterval(fetchLogs, 2000);
       fetchState();
+      fetchLogs();
     </script>
   </body>
 </html>

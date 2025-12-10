@@ -8,6 +8,10 @@ const logFormat = printf(info => {
   return `${ts} [${info.level}] ${info.message}`;
 });
 
+// Simple in-memory log buffer for UI (last N FSM logs)
+const MAX_IN_MEMORY_LOGS = 500;
+const inMemoryLogs: string[] = [];
+
 export const logger = winston.createLogger({
   level: 'debug',
   format: combine(timestamp(), logFormat),
@@ -20,9 +24,18 @@ export const logger = winston.createLogger({
 });
 
 export const logState = (msg: string, ctx?: unknown): void => {
-  if (ctx !== undefined) {
-    logger.debug(`${msg} ${JSON.stringify(ctx)}`);
-  } else {
-    logger.debug(msg);
+  const line =
+    ctx !== undefined ? `${msg} ${JSON.stringify(ctx)}` : msg;
+
+  logger.debug(line);
+
+  // also push into in-memory buffer for UI
+  inMemoryLogs.push(line);
+  if (inMemoryLogs.length > MAX_IN_MEMORY_LOGS) {
+    inMemoryLogs.shift();
   }
+};
+
+export const getRecentLogs = (): string[] => {
+  return inMemoryLogs;
 };

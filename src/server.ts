@@ -1,4 +1,5 @@
 import express from 'express';
+import fetch from 'node-fetch';
 import { createFSM } from './fsmInit';
 import { onSignal, onTick } from './fsmEngine';
 import { FSMContext } from './fsmStates';
@@ -7,12 +8,15 @@ import {
   createLiveContext,
   onPaperEntryOpportunity,
   onLiveTick,
+  forceExitIfCumPnlNonPositive,
+  tryOpenLiveFromPaperPosition,
 } from './liveEngine';
 import { LiveContext } from './liveStates';
 import {
   registerPaperLongOpen,
   registerPaperShortOpen,
 } from './paperHooks';
+import { getRecentLogs, logState } from './logger';
 
 const app = express();
 app.use(express.json());
@@ -30,25 +34,92 @@ const paperShortCtx: FSMContext = createFSM('BTCUSD');
 const liveLongCtx: LiveContext = createLiveContext('BTCUSD-LONG');
 const liveShortCtx: LiveContext = createLiveContext('BTCUSD-SHORT');
 
-// --- Auto tick simulation state ---
+// --- External live trading webhook (Bharath) ---
 
+const LIVE_WEBHOOK_URL =
+  'https://asia-south1-delta-6c4a8.cloudfunctions.net/tradingviewWebhook?token=tradingview';
+
+async function sendLiveWebhookMessage(
+  kind: 'ENTRY' | 'EXIT',
+  symbol: string,
+  refPrice: number,
+): Promise<void> {
+  // Build a TradingView-style message string.
+  const message =
+    kind === 'ENTRY'
+      ? `Accepted Entry + priorRisePct= 0.00 | stopPx=${refPrice} | sym=${symbol}`
+      : `Accepted Exit+ priorRisePct= 0.00 | stopPx=${refPrice} | sym=${symbol}`;
+
+  try {
+    logState('Sending live webhook', { kind, symbol, refPrice, message });
+
+    await fetch(LIVE_WEBHOOK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message }),
+    });
+
+    logState('Live webhook sent to Firebase', {
+      kind,
+      symbol,
+      refPrice,
+    });
+  } catch (err) {
+    logState('Failed to call live webhook', {
+      kind,
+      symbol,
+      refPrice,
+      error: String(err),
+    });
+  }
+}
+
+// --- Price feed mode + simulation state ---
+
+type FeedMode = 'DELTA' | 'SIM';
 type AutoMode = 'PAUSE' | 'UP' | 'DOWN' | 'RANDOM';
 
+let feedMode: FeedMode = 'DELTA'; // default = live Delta feed
+let autoMode: AutoMode = 'PAUSE'; // used only in SIM mode
+
 let currentPrice = 100;
-let autoMode: AutoMode = 'PAUSE';
-
 const TICK_STEP = 0.5;
-const TICK_INTERVAL_MS = 1000;
+const SIM_INTERVAL_MS = 1000;
+const DELTA_INTERVAL_MS = 1000;
 
-// helper: total cum PnL from both paper engines
+// helper: per-side live PnL (realized + unrealized on currentPrice)
+function getSideLivePnl(ctx: FSMContext) {
+  const realized = calcCumPnl(ctx.trades);
+
+  let unrealized = 0;
+  if (ctx.position.isOpen && ctx.position.entryPrice != null) {
+    const entry = ctx.position.entryPrice;
+    if (ctx.position.side === 'BUY') {
+      unrealized = currentPrice - entry;
+    } else if (ctx.position.side === 'SELL') {
+      unrealized = entry - currentPrice;
+    }
+  }
+  const unrealizedRounded = round2(unrealized);
+  const total = round2(realized + unrealizedRounded);
+
+  return {
+    realized,
+    unrealized: unrealizedRounded,
+    total,
+  };
+}
+
+// helper: total live cum PnL from both paper engines
 function getTotalCumPnl(): number {
-  const longPnl = calcCumPnl(paperLongCtx.trades);
-  const shortPnl = calcCumPnl(paperShortCtx.trades);
-  return round2(longPnl + shortPnl);
+  const long = getSideLivePnl(paperLongCtx);
+  const short = getSideLivePnl(paperShortCtx);
+  return round2(long.total + short.total);
 }
 
 // build view object for UI for each paper FSM
 function buildPaperView(ctx: FSMContext) {
+  const pnl = getSideLivePnl(ctx);
   return {
     symbolId: ctx.symbolId,
     state: ctx.state,
@@ -60,13 +131,16 @@ function buildPaperView(ctx: FSMContext) {
     buyStop: ctx.buyStop,
     sellStop: ctx.sellStop,
     trades: ctx.trades,
-    cumPnl: calcCumPnl(ctx.trades),
+    cumPnl: pnl.total,
+    realizedCumPnl: pnl.realized,
+    unrealizedPnl: pnl.unrealized,
   };
 }
 
 // state for /state endpoint
 function getStateSnapshot() {
   return {
+    feedMode,
     currentPrice,
     autoMode,
 
@@ -89,9 +163,121 @@ function getStateSnapshot() {
   };
 }
 
-// --- Auto tick loop: send ticks to BOTH paper FSMs + live FSMs ---
+// --- Delta live feed (primary mode) ---
 
+const DELTA_BASE_URL = 'https://api.delta.exchange';
+const DELTA_SYMBOL = 'BTCUSD';
+
+async function pollDeltaOnce(): Promise<void> {
+  if (feedMode !== 'DELTA') return;
+
+  try {
+    // Use perpetual futures ticker for BTCUSD
+    const url = `${DELTA_BASE_URL}/v2/tickers?contract_types=perpetual_futures&symbol=${DELTA_SYMBOL}`;
+    const res = await fetch(url);
+
+    if (!res.ok) {
+      console.warn('Delta ticker HTTP error', { status: res.status });
+      return;
+    }
+
+    const body = (await res.json()) as any;
+    const ticker = Array.isArray(body.result)
+      ? body.result.find((t: any) => t.symbol === DELTA_SYMBOL)
+      : body.result;
+
+    if (!ticker || ticker.symbol !== DELTA_SYMBOL) {
+      console.warn('Delta ticker: BTCUSD not found in result', body);
+      return;
+    }
+
+    const price = Number(
+      ticker.mark_price ?? ticker.last_price ?? ticker.close,
+    );
+    if (!Number.isFinite(price)) {
+      console.warn('Delta ticker: bad price', { ticker });
+      return;
+    }
+
+    const now = Date.now();
+    currentPrice = price;
+
+    const tick = {
+      symbolId: 'BTCUSD',
+      ltp: currentPrice,
+      ts: now,
+    };
+
+    // feed both paper engines
+    onTick(paperLongCtx, tick);
+    onTick(paperShortCtx, tick);
+
+    // update live engines (for lock expiry etc.)
+    onLiveTick(liveLongCtx, now);
+    onLiveTick(liveShortCtx, now);
+
+    // Immediate live exit check based on total cum PnL
+    const cumPnlTotal = getTotalCumPnl();
+    if (
+      forceExitIfCumPnlNonPositive(liveLongCtx, cumPnlTotal, now) ===
+      'CLOSE_POSITION'
+    ) {
+      // Close LONG → SELL
+      void sendLiveWebhookMessage('EXIT', 'BTCUSD', currentPrice);
+    }
+    if (
+      forceExitIfCumPnlNonPositive(liveShortCtx, cumPnlTotal, now) ===
+      'CLOSE_POSITION'
+    ) {
+      // Close SHORT → BUY
+      void sendLiveWebhookMessage('ENTRY', 'BTCUSD', currentPrice);
+    }
+
+    // Live entry check from existing paper positions when cumPnl > 0
+    if (paperLongCtx.position.isOpen) {
+      const action = tryOpenLiveFromPaperPosition(
+        liveLongCtx,
+        cumPnlTotal,
+        now,
+      );
+      if (
+        action === 'OPEN_POSITION' &&
+        paperLongCtx.position.entryPrice != null
+      ) {
+        liveLongCtx.position.entryPrice = paperLongCtx.position.entryPrice;
+        // Open LONG → BUY
+        void sendLiveWebhookMessage('ENTRY', 'BTCUSD', paperLongCtx.position.entryPrice);
+      }
+    }
+
+    if (paperShortCtx.position.isOpen) {
+      const action = tryOpenLiveFromPaperPosition(
+        liveShortCtx,
+        cumPnlTotal,
+        now,
+      );
+      if (
+        action === 'OPEN_POSITION' &&
+        paperShortCtx.position.entryPrice != null
+      ) {
+        liveShortCtx.position.entryPrice = paperShortCtx.position.entryPrice;
+        // Open SHORT → SELL
+        void sendLiveWebhookMessage('EXIT', 'BTCUSD', paperShortCtx.position.entryPrice);
+      }
+    }
+  } catch (err) {
+    console.error('Delta ticker fetch failed', err);
+  }
+}
+
+// poll Delta every second
+setInterval(pollDeltaOnce, DELTA_INTERVAL_MS);
+
+// --- SIM feed (manual / auto) ---
+
+// auto-sim loop: only active when feedMode === 'SIM'
 setInterval(() => {
+  if (feedMode !== 'SIM') return;
   if (autoMode === 'PAUSE') return;
 
   if (autoMode === 'UP') {
@@ -99,27 +285,77 @@ setInterval(() => {
   } else if (autoMode === 'DOWN') {
     currentPrice -= TICK_STEP;
   } else {
-    // RANDOM
     const dir = Math.random() < 0.5 ? -1 : 1;
     currentPrice += dir * TICK_STEP;
   }
 
   const now = Date.now();
-
   const tick = {
     symbolId: 'BTCUSD',
     ltp: currentPrice,
     ts: now,
   };
 
-  // send tick to BOTH paper engines
   onTick(paperLongCtx, tick);
   onTick(paperShortCtx, tick);
 
-  // check if live locks expire
   onLiveTick(liveLongCtx, now);
   onLiveTick(liveShortCtx, now);
-}, TICK_INTERVAL_MS);
+
+  // Immediate live exit check based on total cum PnL
+  const cumPnlTotal = getTotalCumPnl();
+  if (
+    forceExitIfCumPnlNonPositive(liveLongCtx, cumPnlTotal, now) ===
+    'CLOSE_POSITION'
+  ) {
+    // Close LONG → SELL
+    void sendLiveWebhookMessage('EXIT', 'BTCUSD', currentPrice);
+  }
+  if (
+    forceExitIfCumPnlNonPositive(liveShortCtx, cumPnlTotal, now) ===
+    'CLOSE_POSITION'
+  ) {
+    // Close SHORT → BUY
+    void sendLiveWebhookMessage('ENTRY', 'BTCUSD', currentPrice);
+  }
+
+  // Live entry check from existing paper positions when cumPnl > 0
+  if (paperLongCtx.position.isOpen) {
+    const action = tryOpenLiveFromPaperPosition(
+      liveLongCtx,
+      cumPnlTotal,
+      now,
+    );
+    if (
+      action === 'OPEN_POSITION' &&
+      paperLongCtx.position.entryPrice != null
+    ) {
+      liveLongCtx.position.entryPrice = paperLongCtx.position.entryPrice;
+      // Open LONG → BUY
+      void sendLiveWebhookMessage('ENTRY', 'BTCUSD', paperLongCtx.position.entryPrice);
+    }
+  }
+
+  if (paperShortCtx.position.isOpen) {
+    const action = tryOpenLiveFromPaperPosition(
+      liveShortCtx,
+      cumPnlTotal,
+      now,
+    );
+    if (
+      action === 'OPEN_POSITION' &&
+      paperShortCtx.position.entryPrice != null
+    ) {
+      liveShortCtx.position.entryPrice = paperShortCtx.position.entryPrice;
+      // Open SHORT → SELL
+      void sendLiveWebhookMessage(
+        'EXIT',
+        'BTCUSD',
+        paperShortCtx.position.entryPrice,
+      );
+    }
+  }
+}, SIM_INTERVAL_MS);
 
 // --- Wire paper → live hooks ---
 
@@ -138,8 +374,11 @@ registerPaperLongOpen((paperCtx, nowTs, windowEndTs, entryLtp) => {
   if (action === 'OPEN_POSITION') {
     liveLongCtx.position.entryPrice = entryLtp;
     console.log('LIVE LONG: Would OPEN LONG at', entryLtp);
+    // Send live ENTRY to Bharath
+    void sendLiveWebhookMessage('ENTRY', 'BTCUSD', entryLtp);
   } else if (action === 'CLOSE_POSITION') {
-    console.log('LIVE LONG: Would CLOSE LONG (cumPnl < 0)');
+    // Already handled by forceExitIfCumPnlNonPositive
+    console.log('LIVE LONG: CLOSE_POSITION from paper hook (already exited)');
   }
 });
 
@@ -157,8 +396,11 @@ registerPaperShortOpen((paperCtx, nowTs, windowEndTs, entryLtp) => {
   if (action === 'OPEN_POSITION') {
     liveShortCtx.position.entryPrice = entryLtp;
     console.log('LIVE SHORT: Would OPEN SHORT at', entryLtp);
+    // Send live OPEN SHORT → SELL to Bharath
+    void sendLiveWebhookMessage('EXIT', 'BTCUSD', entryLtp);
   } else if (action === 'CLOSE_POSITION') {
-    console.log('LIVE SHORT: Would CLOSE SHORT (cumPnl < 0)');
+    // Already handled by forceExitIfCumPnlNonPositive
+    console.log('LIVE SHORT: CLOSE_POSITION from paper hook (already exited)');
   }
 });
 
@@ -190,6 +432,25 @@ app.post('/signal', (req, res) => {
 
   return res.json({
     message: 'Signal processed',
+    state: getStateSnapshot(),
+  });
+});
+
+// POST /feed-mode  { mode: "DELTA" | "SIM" }
+app.post('/feed-mode', (req, res) => {
+  const { mode } = req.body as { mode?: FeedMode };
+
+  if (mode !== 'DELTA' && mode !== 'SIM') {
+    return res.status(400).json({
+      error: 'mode must be "DELTA" or "SIM"',
+    });
+  }
+
+  feedMode = mode;
+
+  return res.json({
+    message: 'Feed mode updated',
+    feedMode,
     state: getStateSnapshot(),
   });
 });
@@ -258,7 +519,7 @@ app.post('/webhook', (req, res) => {
 });
 
 
-// POST /tick  { ltp: number }  (optional manual tick)
+// POST /tick  { ltp: number }  (optional manual tick, mainly for SIM mode)
 app.post('/tick', (req, res) => {
   const { ltp } = req.body as { ltp?: number };
 
@@ -315,6 +576,11 @@ app.post('/auto', (req, res) => {
 // GET /state
 app.get('/state', (_req, res) => {
   res.json(getStateSnapshot());
+});
+
+// GET /logs  → recent FSM logs for UI
+app.get('/logs', (_req, res) => {
+  res.json({ logs: getRecentLogs() });
 });
 
 // Start server
