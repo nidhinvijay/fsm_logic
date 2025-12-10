@@ -1,0 +1,443 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>BTCUSD Paper & Live FSM Demo</title>
+    <style>
+      body {
+        font-family: sans-serif;
+        max-width: 1000px;
+        margin: 20px auto;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+      }
+      .card {
+        border: 1px solid #ccc;
+        border-radius: 8px;
+        padding: 16px;
+        margin-bottom: 16px;
+      }
+      input[type='number'] {
+        width: 120px;
+      }
+      pre {
+        background: #f5f5f5;
+        padding: 10px;
+        border-radius: 4px;
+        max-height: 200px;
+        overflow: auto;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      th,
+      td {
+        border: 1px solid #ddd;
+        padding: 6px 8px;
+        text-align: left;
+      }
+      th {
+        background: #f0f0f0;
+      }
+      .pnl-positive {
+        color: green;
+        font-weight: bold;
+      }
+      .pnl-negative {
+        color: red;
+        font-weight: bold;
+      }
+      .pill {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-size: 12px;
+      }
+      .pill-idle {
+        background: #e0f7fa;
+        color: #006064;
+      }
+      .pill-position {
+        background: #e8f5e9;
+        color: #1b5e20;
+      }
+      .pill-locked {
+        background: #ffebee;
+        color: #b71c1c;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>BTCUSD Paper & Live FSM Demo</h1>
+
+    <div class="card">
+      <h2>Auto Tick Control</h2>
+      <p>
+        <strong>Current LTP:</strong>
+        <span id="currentPrice">-</span> |
+        <strong>Auto Mode:</strong>
+        <span id="autoMode">PAUSE</span>
+      </p>
+      <label>
+        Start / Reset Price:
+        <input id="startPrice" type="number" step="0.1" value="100" />
+      </label>
+      <div style="margin-top: 8px">
+        <button onclick="setAuto('UP')">Auto UP (+0.5 / sec)</button>
+        <button onclick="setAuto('DOWN')">Auto DOWN (-0.5 / sec)</button>
+        <button onclick="setAuto('RANDOM')">Auto RANDOM</button>
+        <button onclick="setAuto('PAUSE')">PAUSE</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Send Signal</h2>
+      <button onclick="sendSignal('BUY')">BUY Signal (Paper LONG)</button>
+      <button onclick="sendSignal('SELL')">SELL Signal (Paper SHORT)</button>
+    </div>
+
+    <div class="card">
+      <h2>Manual Tick (optional)</h2>
+      <label>
+        LTP:
+        <input id="ltpInput" type="number" step="0.1" value="100" />
+      </label>
+      <button onclick="sendTick()">Send Tick Once</button>
+    </div>
+
+    <div class="card">
+      <h2>Overall PnL</h2>
+      <p>
+        <strong>Total Paper Cum PnL:</strong>
+        <span id="cumPnlTotal" class="pnl-positive">0.00</span>
+      </p>
+      <p style="font-size: 12px; color: #666;">
+        This is sir's "Cumulate PnL" across both LONG and SHORT paper engines.
+      </p>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h2>Paper LONG FSM (BUY side)</h2>
+        <p><strong>State:</strong> <span id="paperLongState">-</span></p>
+        <p>
+          <strong>Position:</strong>
+          <span id="paperLongPositionInfo">No position</span>
+        </p>
+        <p><strong>Triggers / Stops:</strong></p>
+        <pre id="paperLongThresholds">-</pre>
+      </div>
+
+      <div class="card">
+        <h2>Paper SHORT FSM (SELL side)</h2>
+        <p><strong>State:</strong> <span id="paperShortState">-</span></p>
+        <p>
+          <strong>Position:</strong>
+          <span id="paperShortPositionInfo">No position</span>
+        </p>
+        <p><strong>Triggers / Stops:</strong></p>
+        <pre id="paperShortThresholds">-</pre>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h2>Live LONG FSM (BTCUSD)</h2>
+        <p>
+          <strong>State:</strong>
+          <span id="liveLongStatePill" class="pill pill-idle">-</span>
+        </p>
+        <p>
+          <strong>Position:</strong>
+          <span id="liveLongPositionInfo">No live long</span>
+        </p>
+        <p>
+          <strong>Lock:</strong>
+          <span id="liveLongLockInfo">Not locked</span>
+        </p>
+      </div>
+
+      <div class="card">
+        <h2>Live SHORT FSM (BTCUSD)</h2>
+        <p>
+          <strong>State:</strong>
+          <span id="liveShortStatePill" class="pill pill-idle">-</span>
+        </p>
+        <p>
+          <strong>Position:</strong>
+          <span id="liveShortPositionInfo">No live short</span>
+        </p>
+        <p>
+          <strong>Lock:</strong>
+          <span id="liveShortLockInfo">Not locked</span>
+        </p>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Trades (Paper LONG + SHORT)</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Side</th>
+            <th>Entry</th>
+            <th>Exit</th>
+            <th>PnL</th>
+          </tr>
+        </thead>
+        <tbody id="tradeRows">
+          <tr>
+            <td colspan="5">No trades yet</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>Raw State JSON</h2>
+      <pre id="rawState">-</pre>
+    </div>
+
+    <script>
+      async function fetchState() {
+        const res = await fetch('/state');
+        const data = await res.json();
+        renderState(data);
+      }
+
+      async function sendSignal(side) {
+        const res = await fetch('/signal', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ side }),
+        });
+        const data = await res.json();
+        renderState(data.state);
+      }
+
+      async function sendTick() {
+        const ltpInput = document.getElementById('ltpInput');
+        const ltp = parseFloat(ltpInput.value);
+        if (Number.isNaN(ltp)) {
+          alert('Enter a valid number for LTP');
+          return;
+        }
+
+        const res = await fetch('/tick', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ltp }),
+        });
+        const data = await res.json();
+        renderState(data.state);
+      }
+
+      async function setAuto(mode) {
+        const body = { mode };
+
+        const startPriceInput = document.getElementById('startPrice');
+        const ltp = parseFloat(startPriceInput.value);
+
+        if (mode === 'PAUSE' && !Number.isNaN(ltp)) {
+          body.ltp = ltp;
+        }
+
+        const res = await fetch('/auto', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+
+        const data = await res.json();
+        renderState(data.state);
+        document.getElementById('currentPrice').textContent =
+          data.currentPrice ?? '-';
+        document.getElementById('autoMode').textContent =
+          data.autoMode ?? mode;
+      }
+
+      function renderState(state) {
+        if (!state) return;
+
+        document.getElementById('currentPrice').textContent =
+          state.currentPrice ?? '-';
+        document.getElementById('autoMode').textContent =
+          state.autoMode ?? 'PAUSE';
+
+        // Total cum PnL
+        const totalEl = document.getElementById('cumPnlTotal');
+        const total = typeof state.cumPnlTotal === 'number'
+          ? state.cumPnlTotal
+          : 0;
+        totalEl.textContent = total.toFixed(2);
+        totalEl.classList.remove('pnl-positive', 'pnl-negative');
+        if (total > 0) totalEl.classList.add('pnl-positive');
+        else if (total < 0) totalEl.classList.add('pnl-negative');
+
+        // Paper LONG
+        const pLong = state.paperLong || {};
+        document.getElementById('paperLongState').textContent =
+          pLong.state ?? '-';
+        if (pLong.position && pLong.position.isOpen) {
+          document.getElementById('paperLongPositionInfo').textContent =
+            `${pLong.position.side} @ ${pLong.position.entryPrice}`;
+        } else {
+          document.getElementById('paperLongPositionInfo').textContent =
+            'No position';
+        }
+        const longThresh = {
+          savedBUYLTP: pLong.savedBUYLTP,
+          buyEntryTrigger: pLong.buyEntryTrigger,
+          buyStop: pLong.buyStop,
+        };
+        document.getElementById('paperLongThresholds').textContent =
+          JSON.stringify(longThresh, null, 2);
+
+        // Paper SHORT
+        const pShort = state.paperShort || {};
+        document.getElementById('paperShortState').textContent =
+          pShort.state ?? '-';
+        if (pShort.position && pShort.position.isOpen) {
+          document.getElementById('paperShortPositionInfo').textContent =
+            `${pShort.position.side} @ ${pShort.position.entryPrice}`;
+        } else {
+          document.getElementById('paperShortPositionInfo').textContent =
+            'No position';
+        }
+        const shortThresh = {
+          savedSELLLTP: pShort.savedSELLLTP,
+          sellEntryTrigger: pShort.sellEntryTrigger,
+          sellStop: pShort.sellStop,
+        };
+        document.getElementById('paperShortThresholds').textContent =
+          JSON.stringify(shortThresh, null, 2);
+
+        // Live LONG
+        renderLiveSide('Long', state.liveLong);
+        // Live SHORT
+        renderLiveSide('Short', state.liveShort);
+
+        // Trades combined
+        const longTrades = pLong.trades || [];
+        const shortTrades = pShort.trades || [];
+        const allTrades = [...longTrades, ...shortTrades].sort((a, b) => {
+          const ta = a.closedAt ?? a.openedAt ?? 0;
+          const tb = b.closedAt ?? b.openedAt ?? 0;
+          return ta - tb;
+        });
+
+        const tbody = document.getElementById('tradeRows');
+        tbody.innerHTML = '';
+        if (allTrades.length === 0) {
+          const row = document.createElement('tr');
+          const cell = document.createElement('td');
+          cell.colSpan = 5;
+          cell.textContent = 'No trades yet';
+          row.appendChild(cell);
+          tbody.appendChild(row);
+        } else {
+          allTrades.forEach((t, idx) => {
+            const row = document.createElement('tr');
+
+            const cIdx = document.createElement('td');
+            cIdx.textContent = String(idx + 1);
+            row.appendChild(cIdx);
+
+            const cSide = document.createElement('td');
+            cSide.textContent = t.side;
+            row.appendChild(cSide);
+
+            const cEntry = document.createElement('td');
+            cEntry.textContent =
+              typeof t.entryPrice === 'number'
+                ? t.entryPrice.toFixed(2)
+                : '-';
+            row.appendChild(cEntry);
+
+            const cExit = document.createElement('td');
+            cExit.textContent =
+              t.exitPrice != null ? t.exitPrice.toFixed(2) : '-';
+            row.appendChild(cExit);
+
+            const cPnl = document.createElement('td');
+            if (typeof t.pnl === 'number') {
+              cPnl.textContent = t.pnl.toFixed(2);
+              if (t.pnl > 0) cPnl.style.color = 'green';
+              else if (t.pnl < 0) cPnl.style.color = 'red';
+            } else {
+              cPnl.textContent = '-';
+            }
+            row.appendChild(cPnl);
+
+            tbody.appendChild(row);
+          });
+        }
+
+        document.getElementById('rawState').textContent = JSON.stringify(
+          state,
+          null,
+          2,
+        );
+      }
+
+      function renderLiveSide(suffix, data) {
+        const pill = document.getElementById(`live${suffix}StatePill`);
+        const info = document.getElementById(`live${suffix}PositionInfo`);
+        const lockInfo = document.getElementById(`live${suffix}LockInfo`);
+
+        if (!data) {
+          pill.textContent = '-';
+          info.textContent = 'No data';
+          lockInfo.textContent = 'Not locked';
+          return;
+        }
+
+        const liveState = data.state || 'IDLE';
+        const livePos = data.position || {};
+        const lockTs = data.lockUntilTs || null;
+
+        pill.textContent = liveState;
+        pill.classList.remove('pill-idle', 'pill-position', 'pill-locked');
+
+        if (liveState === 'POSITION') {
+          pill.classList.add('pill-position');
+        } else if (liveState === 'LOCKED') {
+          pill.classList.add('pill-locked');
+        } else {
+          pill.classList.add('pill-idle');
+        }
+
+        if (livePos.isOpen) {
+          const dirLabel = suffix.toUpperCase();
+          info.textContent = `${dirLabel} @ ${livePos.entryPrice ?? 'N/A'}`;
+        } else {
+          info.textContent =
+            suffix === 'Long' ? 'No live long' : 'No live short';
+        }
+
+        if (liveState === 'LOCKED' && lockTs) {
+          const now = Date.now();
+          const remainingMs = lockTs - now;
+          if (remainingMs > 0) {
+            const secs = Math.round(remainingMs / 1000);
+            lockInfo.textContent = `LOCKED for ~${secs}s (until ${new Date(
+              lockTs,
+            ).toLocaleTimeString()})`;
+          } else {
+            lockInfo.textContent = 'Lock expired (awaiting unlock tick)';
+          }
+        } else {
+          lockInfo.textContent = 'Not locked';
+        }
+      }
+
+      setInterval(fetchState, 2000);
+      fetchState();
+    </script>
+  </body>
+</html>
