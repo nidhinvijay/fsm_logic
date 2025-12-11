@@ -241,3 +241,19 @@
 2025-12-10T18:40:50.925Z [debug] Live OPEN_POSITION from paper position and positive cumPnl {"symbolId":"BTCUSD-SHORT","cumPnl":8.36,"nowTs":1765392050925}
 2025-12-10T18:40:50.926Z [debug] Sending live webhook {"kind":"EXIT","symbol":"BTCUSD","refPrice":92682.683259,"message":"Accepted Exit+ priorRisePct= 0.00 | stopPx=92682.683259 | sym=BTCUSD"}
 2025-12-10T18:40:52.667Z [debug] Live webhook sent to Firebase {"kind":"EXIT","symbol":"BTCUSD","refPrice":92682.683259}
+2025-12-10T18:45:07.690Z [debug] FSM created for symbol: BTCUSD {"state":"WAIT_FOR_SIGNAL"}
+2025-12-10T18:45:07.696Z [debug] FSM created for symbol: BTCUSD {"state":"WAIT_FOR_SIGNAL"}
+2025-12-10T18:45:07.697Z [debug] Live FSM created {"symbolId":"BTCUSD-LONG","state":"IDLE"}
+2025-12-10T18:45:07.698Z [debug] Live FSM created {"symbolId":"BTCUSD-SHORT","state":"IDLE"}
+2025-12-10T18:45:20.519Z [debug] SELL_SIGNAL entered {"symbolId":"BTCUSD","from":"WAIT_FOR_SIGNAL","ts":1765392320519}
+2025-12-10T18:45:20.902Z [debug] Window started {"symbolId":"BTCUSD","startTs":1765392320902,"durationMs":60000}
+2025-12-10T18:45:20.903Z [debug] Transition SELL_SIGNAL -> SELLENTRY_WINDOW {"symbolId":"BTCUSD","from":"SELL_SIGNAL","to":"SELLENTRY_WINDOW","savedSELLLTP":92559.19917,"sellEntryTrigger":92558.69917,"sellStop":92559.69917,"tickLtp":92559.19917,"ts":1765392320902}
+2025-12-10T18:45:22.610Z [debug] SELLENTRY_WINDOW stop hit, fail cycle {"symbolId":"BTCUSD","ltp":92595.012896,"stop":92559.69917}
+2025-12-10T18:45:22.611Z [debug] Window started {"symbolId":"BTCUSD","startTs":1765392322610,"durationMs":58292}
+2025-12-10T18:45:22.612Z [debug] Entry window -> WAIT_WINDOW {"symbolId":"BTCUSD","from":"SELLENTRY_WINDOW","remainingMs":58292}
+2025-12-10T18:45:36.312Z [debug] BUY_SIGNAL entered {"symbolId":"BTCUSD","from":"WAIT_FOR_SIGNAL","ts":1765392336311}
+2025-12-10T18:45:37.185Z [debug] Window started {"symbolId":"BTCUSD","startTs":1765392337185,"durationMs":60000}
+2025-12-10T18:45:37.186Z [debug] Transition BUY_SIGNAL -> BUYENTRY_WINDOW {"symbolId":"BTCUSD","from":"BUY_SIGNAL","to":"BUYENTRY_WINDOW","savedBUYLTP":92633.785982,"buyEntryTrigger":92634.285982,"buyStop":92633.285982,"tickLtp":92633.785982,"ts":1765392337185}
+2025-12-10T18:45:40.668Z [debug] Window started {"symbolId":"BTCUSD","startTs":1765392340668,"durationMs":60000}
+2025-12-10T18:45:40.668Z [debug] Open LONG from BUYENTRY_WINDOW {"symbolId":"BTCUSD","from":"BUYENTRY_WINDOW","to":"BUYPROFIT_WINDOW","entryPrice":92635.28856,"trigger":92634.285982,"stop":92633.285982}
+2025-12-10T18:45:40.669Z [debug] Live cumPnl <= 0 but no open position; leaving live state unchanged {"symbolId":"BTCUSD-LONG","cumPnl":0,"nowTs":1765392340668}

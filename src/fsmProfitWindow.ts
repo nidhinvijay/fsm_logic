@@ -32,7 +32,7 @@ const moveToWaitFromProfit = (ctx: FSMContext, nowTs: number): void => {
   });
 };
 
-const closePosition = (
+export const closePosition = (
   ctx: FSMContext,
   exitPrice: number,
   exitTs: number,

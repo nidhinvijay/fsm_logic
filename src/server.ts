@@ -17,6 +17,7 @@ import {
   registerPaperShortOpen,
 } from './paperHooks';
 import { getRecentLogs, logState } from './logger';
+import { closePosition } from './fsmProfitWindow';
 
 const app = express();
 app.use(express.json());
@@ -25,14 +26,14 @@ app.use(express.static('public'));
 // --- Paper FSMs (separate BUY + SELL) ---
 
 // BUY side (LONG paper FSM)
-const paperLongCtx: FSMContext = createFSM('BTCUSD');
+let paperLongCtx: FSMContext = createFSM('BTCUSD');
 // SELL side (SHORT paper FSM)
-const paperShortCtx: FSMContext = createFSM('BTCUSD');
+let paperShortCtx: FSMContext = createFSM('BTCUSD');
 
 // --- Live FSMs (LONG + SHORT) ---
 
-const liveLongCtx: LiveContext = createLiveContext('BTCUSD-LONG');
-const liveShortCtx: LiveContext = createLiveContext('BTCUSD-SHORT');
+let liveLongCtx: LiveContext = createLiveContext('BTCUSD-LONG');
+let liveShortCtx: LiveContext = createLiveContext('BTCUSD-SHORT');
 
 // --- External live trading webhook (Bharath) ---
 
@@ -86,6 +87,9 @@ let currentPrice = 100;
 const TICK_STEP = 0.5;
 const SIM_INTERVAL_MS = 1000;
 const DELTA_INTERVAL_MS = 1000;
+
+// Track last day (in IST) when we ran daily reset
+let lastDailyResetIstDate: string | null = null;
 
 // helper: per-side live PnL (realized + unrealized on currentPrice)
 function getSideLivePnl(ctx: FSMContext) {
@@ -163,6 +167,57 @@ function getStateSnapshot() {
   };
 }
 
+// --- Daily reset at 05:30 IST: close positions and restart FSMs ---
+
+function runDailyResetIfNeeded(nowUtcMs: number) {
+  // convert to IST by adding 5.5 hours
+  const ist = new Date(nowUtcMs + 5.5 * 60 * 60 * 1000);
+  const istHour = ist.getHours();
+  const istMinute = ist.getMinutes();
+
+  const istDateKey = ist.toISOString().slice(0, 10); // YYYY-MM-DD of IST-shifted time
+
+  if (istHour === 5 && istMinute === 30 && lastDailyResetIstDate !== istDateKey) {
+    lastDailyResetIstDate = istDateKey;
+    const nowTs = nowUtcMs;
+
+    logState('Daily reset at 05:30 IST starting', {
+      istDate: istDateKey,
+      istTime: ist.toISOString(),
+      currentPrice,
+    });
+
+    // Close any open paper positions at currentPrice
+    if (paperLongCtx.position.isOpen && paperLongCtx.position.entryPrice != null) {
+      closePosition(paperLongCtx, currentPrice, nowTs);
+    }
+    if (paperShortCtx.position.isOpen && paperShortCtx.position.entryPrice != null) {
+      closePosition(paperShortCtx, currentPrice, nowTs);
+    }
+
+    // Close any open live positions and notify Bharath
+    if (liveLongCtx.position.isOpen) {
+      // Close live LONG → SELL
+      void sendLiveWebhookMessage('EXIT', 'BTCUSD', currentPrice);
+    }
+    if (liveShortCtx.position.isOpen) {
+      // Close live SHORT → BUY
+      void sendLiveWebhookMessage('ENTRY', 'BTCUSD', currentPrice);
+    }
+
+    // Recreate fresh FSM contexts for new day
+    paperLongCtx = createFSM('BTCUSD');
+    paperShortCtx = createFSM('BTCUSD');
+    liveLongCtx = createLiveContext('BTCUSD-LONG');
+    liveShortCtx = createLiveContext('BTCUSD-SHORT');
+
+    logState('Daily reset at 05:30 IST completed', {
+      istDate: istDateKey,
+      istTime: ist.toISOString(),
+    });
+  }
+}
+
 // --- Delta live feed (primary mode) ---
 
 const DELTA_BASE_URL = 'https://api.delta.exchange';
@@ -200,6 +255,7 @@ async function pollDeltaOnce(): Promise<void> {
     }
 
     const now = Date.now();
+    runDailyResetIfNeeded(now);
     currentPrice = price;
 
     const tick = {
@@ -290,6 +346,7 @@ setInterval(() => {
   }
 
   const now = Date.now();
+  runDailyResetIfNeeded(now);
   const tick = {
     symbolId: 'BTCUSD',
     ltp: currentPrice,
@@ -529,6 +586,7 @@ app.post('/tick', (req, res) => {
 
   currentPrice = ltp;
   const now = Date.now();
+  runDailyResetIfNeeded(now);
 
   const tick = {
     symbolId: 'BTCUSD',

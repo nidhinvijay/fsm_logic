@@ -3,9 +3,27 @@ import winston from 'winston';
 
 const { combine, timestamp, printf, colorize } = winston.format;
 
+// Format timestamp in Indian time (Asia/Kolkata) for readability
 const logFormat = printf(info => {
-  const ts = (info.timestamp as string) ?? '';
-  return `${ts} [${info.level}] ${info.message}`;
+  const tsRaw = (info.timestamp as string) ?? '';
+  let tsIst = tsRaw;
+  try {
+    const d = new Date(tsRaw);
+    tsIst = d.toLocaleString('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    });
+  } catch {
+    // fall back to raw timestamp on any error
+    tsIst = tsRaw;
+  }
+  return `${tsIst} [${info.level}] ${info.message}`;
 });
 
 // Simple in-memory log buffer for UI (last N FSM logs)
