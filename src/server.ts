@@ -1,5 +1,7 @@
 import express from 'express';
 import fetch from 'node-fetch';
+import fs from 'fs';
+import path from 'path';
 import { createFSM } from './fsmInit';
 import { onSignal, onTick } from './fsmEngine';
 import { FSMContext } from './fsmStates';
@@ -35,6 +37,14 @@ let paperShortCtx: FSMContext = createFSM('BTCUSD');
 
 let liveLongCtx: LiveContext = createLiveContext('BTCUSD-LONG');
 let liveShortCtx: LiveContext = createLiveContext('BTCUSD-SHORT');
+
+// --- Live realized PnL tracking (per side) ---
+
+let liveLongCumPnl = 0;
+let liveShortCumPnl = 0;
+
+let liveLongEntryPrice: number | null = null;
+let liveShortEntryPrice: number | null = null;
 
 // --- External live trading webhook (Bharath) ---
 
@@ -74,6 +84,38 @@ async function sendLiveWebhookMessage(
       error: String(err),
     });
   }
+}
+
+// Helpers to open/close live trades and maintain realized cum PnL per side.
+
+function openLiveLong(entryPrice: number): void {
+  liveLongEntryPrice = entryPrice;
+  void sendLiveWebhookMessage('ENTRY', 'BTCUSD', entryPrice);
+}
+
+function closeLiveLong(exitPrice: number): void {
+  if (liveLongEntryPrice != null) {
+    const pnl = round2(exitPrice - liveLongEntryPrice);
+    liveLongCumPnl = round2(liveLongCumPnl + pnl);
+  }
+  liveLongEntryPrice = null;
+  void sendLiveWebhookMessage('EXIT', 'BTCUSD', exitPrice);
+}
+
+function openLiveShort(entryPrice: number): void {
+  liveShortEntryPrice = entryPrice;
+  // Open SHORT → SELL
+  void sendLiveWebhookMessage('EXIT', 'BTCUSD', entryPrice);
+}
+
+function closeLiveShort(exitPrice: number): void {
+  if (liveShortEntryPrice != null) {
+    const pnl = round2(liveShortEntryPrice - exitPrice);
+    liveShortCumPnl = round2(liveShortCumPnl + pnl);
+  }
+  liveShortEntryPrice = null;
+  // Close SHORT → BUY
+  void sendLiveWebhookMessage('ENTRY', 'BTCUSD', exitPrice);
 }
 
 // --- Price feed mode + simulation state ---
@@ -134,6 +176,8 @@ interface PnlSnapshot {
   paperLongCumPnl: number;
   paperShortCumPnl: number;
   cumPnlTotal: number;
+  liveLongCumPnl: number;
+  liveShortCumPnl: number;
   trade?: {
     side: 'BUY' | 'SELL';
     entryPrice: number;
@@ -177,12 +221,73 @@ function buildPnlSnapshot(
     paperLongCumPnl: longPnl.total,
     paperShortCumPnl: shortPnl.total,
     cumPnlTotal: totalCumPnl,
+    liveLongCumPnl,
+    liveShortCumPnl,
     trade: tradePayload,
   };
 }
 
 function logPnlSnapshot(snapshot: PnlSnapshot): void {
   logState('PnL snapshot', snapshot);
+  recordPnlMinute(snapshot);
+}
+
+// --- Per-minute PnL history (IST), written to CSV for end-of-day analysis ---
+
+let lastPnlMinuteKey: string | null = null;
+let lastPnlMinuteSnapshot: PnlSnapshot | null = null;
+
+function writePnlCsvRow(snapshot: PnlSnapshot): void {
+  const istIso = snapshot.eventTsIst;
+  const datePart = istIso.slice(0, 10); // YYYY-MM-DD
+  const timePart = istIso.slice(11, 16); // HH:MM
+  const minuteKey = `${datePart} ${timePart}`;
+
+  const filePath = path.join('logs', `pnl-${datePart}.csv`);
+  const header =
+    'timeIst,paperLongCumPnl,paperShortCumPnl,liveLongCumPnl,liveShortCumPnl\n';
+
+  const line =
+    `${minuteKey},` +
+    `${snapshot.paperLongCumPnl.toFixed(2)},` +
+    `${snapshot.paperShortCumPnl.toFixed(2)},` +
+    `${snapshot.liveLongCumPnl.toFixed(2)},` +
+    `${snapshot.liveShortCumPnl.toFixed(2)}\n`;
+
+  if (!fs.existsSync(filePath)) {
+    fs.appendFileSync(filePath, header + line);
+  } else {
+    fs.appendFileSync(filePath, line);
+  }
+}
+
+function recordPnlMinute(snapshot: PnlSnapshot): void {
+  const istIso = snapshot.eventTsIst;
+  const datePart = istIso.slice(0, 10);
+  const timePart = istIso.slice(11, 16); // HH:MM
+  const minuteKey = `${datePart} ${timePart}`;
+
+  if (!lastPnlMinuteKey) {
+    lastPnlMinuteKey = minuteKey;
+    lastPnlMinuteSnapshot = snapshot;
+    writePnlCsvRow(snapshot);
+    return;
+  }
+
+  if (minuteKey === lastPnlMinuteKey) {
+    // Same minute → overwrite in-memory snapshot; no immediate write.
+    lastPnlMinuteSnapshot = snapshot;
+    return;
+  }
+
+  // Minute changed → flush previous snapshot, then start new minute.
+  if (lastPnlMinuteSnapshot) {
+    writePnlCsvRow(lastPnlMinuteSnapshot);
+  }
+
+  lastPnlMinuteKey = minuteKey;
+  lastPnlMinuteSnapshot = snapshot;
+  writePnlCsvRow(snapshot);
 }
 
 function checkForNewTrades(): void {
@@ -284,11 +389,11 @@ function runDailyResetIfNeeded(nowUtcMs: number) {
     // Close any open live positions and notify Bharath
     if (liveLongCtx.position.isOpen) {
       // Close live LONG → SELL
-      void sendLiveWebhookMessage('EXIT', 'BTCUSD', currentPrice);
+      closeLiveLong(currentPrice);
     }
     if (liveShortCtx.position.isOpen) {
       // Close live SHORT → BUY
-      void sendLiveWebhookMessage('ENTRY', 'BTCUSD', currentPrice);
+      closeLiveShort(currentPrice);
     }
 
     // Log final PnL snapshot for the day
@@ -372,14 +477,14 @@ async function pollDeltaOnce(): Promise<void> {
       'CLOSE_POSITION'
     ) {
       // Close LONG → SELL
-      void sendLiveWebhookMessage('EXIT', 'BTCUSD', currentPrice);
+      closeLiveLong(currentPrice);
     }
     if (
       forceExitIfCumPnlNonPositive(liveShortCtx, cumPnlTotal, now) ===
       'CLOSE_POSITION'
     ) {
       // Close SHORT → BUY
-      void sendLiveWebhookMessage('ENTRY', 'BTCUSD', currentPrice);
+      closeLiveShort(currentPrice);
     }
 
     // Live entry check from existing paper positions when cumPnl > 0
@@ -395,7 +500,7 @@ async function pollDeltaOnce(): Promise<void> {
       ) {
         liveLongCtx.position.entryPrice = paperLongCtx.position.entryPrice;
         // Open LONG → BUY
-        void sendLiveWebhookMessage('ENTRY', 'BTCUSD', paperLongCtx.position.entryPrice);
+        openLiveLong(paperLongCtx.position.entryPrice);
       }
     }
 
@@ -411,7 +516,7 @@ async function pollDeltaOnce(): Promise<void> {
       ) {
         liveShortCtx.position.entryPrice = paperShortCtx.position.entryPrice;
         // Open SHORT → SELL
-        void sendLiveWebhookMessage('EXIT', 'BTCUSD', paperShortCtx.position.entryPrice);
+        openLiveShort(paperShortCtx.position.entryPrice);
       }
     }
 
@@ -462,14 +567,14 @@ setInterval(() => {
     'CLOSE_POSITION'
   ) {
     // Close LONG → SELL
-    void sendLiveWebhookMessage('EXIT', 'BTCUSD', currentPrice);
+    closeLiveLong(currentPrice);
   }
   if (
     forceExitIfCumPnlNonPositive(liveShortCtx, cumPnlTotal, now) ===
     'CLOSE_POSITION'
   ) {
     // Close SHORT → BUY
-    void sendLiveWebhookMessage('ENTRY', 'BTCUSD', currentPrice);
+    closeLiveShort(currentPrice);
   }
 
   // Live entry check from existing paper positions when cumPnl > 0
@@ -485,7 +590,7 @@ setInterval(() => {
     ) {
       liveLongCtx.position.entryPrice = paperLongCtx.position.entryPrice;
       // Open LONG → BUY
-      void sendLiveWebhookMessage('ENTRY', 'BTCUSD', paperLongCtx.position.entryPrice);
+      openLiveLong(paperLongCtx.position.entryPrice);
     }
   }
 
@@ -501,11 +606,7 @@ setInterval(() => {
     ) {
       liveShortCtx.position.entryPrice = paperShortCtx.position.entryPrice;
       // Open SHORT → SELL
-      void sendLiveWebhookMessage(
-        'EXIT',
-        'BTCUSD',
-        paperShortCtx.position.entryPrice,
-      );
+      openLiveShort(paperShortCtx.position.entryPrice);
     }
   }
 
@@ -531,7 +632,7 @@ registerPaperLongOpen((paperCtx, nowTs, windowEndTs, entryLtp) => {
     liveLongCtx.position.entryPrice = entryLtp;
     console.log('LIVE LONG: Would OPEN LONG at', entryLtp);
     // Send live ENTRY to Bharath
-    void sendLiveWebhookMessage('ENTRY', 'BTCUSD', entryLtp);
+    openLiveLong(entryLtp);
   } else if (action === 'CLOSE_POSITION') {
     // Already handled by forceExitIfCumPnlNonPositive
     console.log('LIVE LONG: CLOSE_POSITION from paper hook (already exited)');
@@ -553,7 +654,7 @@ registerPaperShortOpen((paperCtx, nowTs, windowEndTs, entryLtp) => {
     liveShortCtx.position.entryPrice = entryLtp;
     console.log('LIVE SHORT: Would OPEN SHORT at', entryLtp);
     // Send live OPEN SHORT → SELL to Bharath
-    void sendLiveWebhookMessage('EXIT', 'BTCUSD', entryLtp);
+    openLiveShort(entryLtp);
   } else if (action === 'CLOSE_POSITION') {
     // Already handled by forceExitIfCumPnlNonPositive
     console.log('LIVE SHORT: CLOSE_POSITION from paper hook (already exited)');
@@ -751,7 +852,8 @@ app.get('/pnl', (_req, res) => {
   res.json({
     paperLongCumPnl: snapshot.paperLongCumPnl,
     paperShortCumPnl: snapshot.paperShortCumPnl,
-    cumPnlTotal: snapshot.cumPnlTotal,
+    liveLongCumPnl: snapshot.liveLongCumPnl,
+    liveShortCumPnl: snapshot.liveShortCumPnl,
   });
 });
 
