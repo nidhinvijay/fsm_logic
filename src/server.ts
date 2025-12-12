@@ -173,8 +173,9 @@ function buildPnlSnapshot(
     symbol: 'BTCUSD',
     eventTsUtc: utc.toISOString(),
     eventTsIst: ist.toISOString(),
-    paperLongCumPnl: calcCumPnl(paperLongCtx.trades),
-    paperShortCumPnl: calcCumPnl(paperShortCtx.trades),
+    // Per-side cum PnL including unrealized on the current open position.
+    paperLongCumPnl: longPnl.total,
+    paperShortCumPnl: shortPnl.total,
     cumPnlTotal: totalCumPnl,
     trade: tradePayload,
   };
