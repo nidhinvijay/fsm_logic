@@ -12,6 +12,7 @@ import {
   tryOpenLiveFromPaperPosition,
 } from './liveEngine';
 import { LiveContext } from './liveStates';
+import { PaperTrade } from './types';
 import {
   registerPaperLongOpen,
   registerPaperShortOpen,
@@ -91,6 +92,10 @@ const DELTA_INTERVAL_MS = 1000;
 // Track last day (in IST) when we ran daily reset
 let lastDailyResetIstDate: string | null = null;
 
+// Track last seen trade counts so we can detect newly closed trades
+let lastLongTradeCount = paperLongCtx.trades.length;
+let lastShortTradeCount = paperShortCtx.trades.length;
+
 // helper: per-side live PnL (realized + unrealized on currentPrice)
 function getSideLivePnl(ctx: FSMContext) {
   const realized = calcCumPnl(ctx.trades);
@@ -119,6 +124,86 @@ function getTotalCumPnl(): number {
   const long = getSideLivePnl(paperLongCtx);
   const short = getSideLivePnl(paperShortCtx);
   return round2(long.total + short.total);
+}
+
+interface PnlSnapshot {
+  kind: 'TRADE_CLOSE' | 'DAILY_RESET';
+  symbol: string;
+  eventTsUtc: string;
+  eventTsIst: string;
+  paperLongCumPnl: number;
+  paperShortCumPnl: number;
+  cumPnlTotal: number;
+  trade?: {
+    side: 'BUY' | 'SELL';
+    entryPrice: number;
+    exitPrice: number;
+    pnl: number;
+    openedAt: number;
+    closedAt: number;
+  };
+}
+
+function buildPnlSnapshot(
+  kind: PnlSnapshot['kind'],
+  eventTsMs: number,
+  trade?: PaperTrade,
+): PnlSnapshot {
+  const utc = new Date(eventTsMs);
+  const ist = new Date(eventTsMs + 5.5 * 60 * 60 * 1000);
+
+  const longPnl = getSideLivePnl(paperLongCtx);
+  const shortPnl = getSideLivePnl(paperShortCtx);
+  const totalCumPnl = round2(longPnl.total + shortPnl.total);
+
+  const tradePayload =
+    trade && trade.entryPrice != null && trade.exitPrice != null && trade.pnl != null
+      ? {
+          side: trade.side,
+          entryPrice: trade.entryPrice,
+          exitPrice: trade.exitPrice,
+          pnl: trade.pnl,
+          openedAt: trade.openedAt,
+          closedAt: trade.closedAt ?? eventTsMs,
+        }
+      : undefined;
+
+  return {
+    kind,
+    symbol: 'BTCUSD',
+    eventTsUtc: utc.toISOString(),
+    eventTsIst: ist.toISOString(),
+    paperLongCumPnl: calcCumPnl(paperLongCtx.trades),
+    paperShortCumPnl: calcCumPnl(paperShortCtx.trades),
+    cumPnlTotal: totalCumPnl,
+    trade: tradePayload,
+  };
+}
+
+function logPnlSnapshot(snapshot: PnlSnapshot): void {
+  logState('PnL snapshot', snapshot);
+}
+
+function checkForNewTrades(): void {
+  // LONG side
+  if (paperLongCtx.trades.length > lastLongTradeCount) {
+    for (let i = lastLongTradeCount; i < paperLongCtx.trades.length; i += 1) {
+      const trade = paperLongCtx.trades[i];
+      const eventTs = trade.closedAt ?? Date.now();
+      logPnlSnapshot(buildPnlSnapshot('TRADE_CLOSE', eventTs, trade));
+    }
+    lastLongTradeCount = paperLongCtx.trades.length;
+  }
+
+  // SHORT side
+  if (paperShortCtx.trades.length > lastShortTradeCount) {
+    for (let i = lastShortTradeCount; i < paperShortCtx.trades.length; i += 1) {
+      const trade = paperShortCtx.trades[i];
+      const eventTs = trade.closedAt ?? Date.now();
+      logPnlSnapshot(buildPnlSnapshot('TRADE_CLOSE', eventTs, trade));
+    }
+    lastShortTradeCount = paperShortCtx.trades.length;
+  }
 }
 
 // build view object for UI for each paper FSM
@@ -205,11 +290,18 @@ function runDailyResetIfNeeded(nowUtcMs: number) {
       void sendLiveWebhookMessage('ENTRY', 'BTCUSD', currentPrice);
     }
 
+    // Log final PnL snapshot for the day
+    logPnlSnapshot(buildPnlSnapshot('DAILY_RESET', nowTs));
+
     // Recreate fresh FSM contexts for new day
     paperLongCtx = createFSM('BTCUSD');
     paperShortCtx = createFSM('BTCUSD');
     liveLongCtx = createLiveContext('BTCUSD-LONG');
     liveShortCtx = createLiveContext('BTCUSD-SHORT');
+
+    // Reset trade counters for new contexts
+    lastLongTradeCount = paperLongCtx.trades.length;
+    lastShortTradeCount = paperShortCtx.trades.length;
 
     logState('Daily reset at 05:30 IST completed', {
       istDate: istDateKey,
@@ -321,6 +413,9 @@ async function pollDeltaOnce(): Promise<void> {
         void sendLiveWebhookMessage('EXIT', 'BTCUSD', paperShortCtx.position.entryPrice);
       }
     }
+
+    // After processing this tick, check if any paper trades just closed
+    checkForNewTrades();
   } catch (err) {
     console.error('Delta ticker fetch failed', err);
   }
@@ -412,6 +507,9 @@ setInterval(() => {
       );
     }
   }
+
+  // After processing this simulated tick, check for newly closed trades
+  checkForNewTrades();
 }, SIM_INTERVAL_MS);
 
 // --- Wire paper → live hooks ---
@@ -600,6 +698,9 @@ app.post('/tick', (req, res) => {
   onLiveTick(liveLongCtx, now);
   onLiveTick(liveShortCtx, now);
 
+  // Manual tick can also close trades; capture any new ones
+  checkForNewTrades();
+
   return res.json({
     message: 'Tick processed',
     state: getStateSnapshot(),
@@ -639,6 +740,18 @@ app.get('/state', (_req, res) => {
 // GET /logs  → recent FSM logs for UI
 app.get('/logs', (_req, res) => {
   res.json({ logs: getRecentLogs() });
+});
+
+// GET /pnl  → expose current cum PnL that controls live gating
+app.get('/pnl', (_req, res) => {
+  const now = Date.now();
+  const snapshot = buildPnlSnapshot('DAILY_RESET', now); // kind label not important here
+
+  res.json({
+    paperLongCumPnl: snapshot.paperLongCumPnl,
+    paperShortCumPnl: snapshot.paperShortCumPnl,
+    cumPnlTotal: snapshot.cumPnlTotal,
+  });
 });
 
 // Start server
