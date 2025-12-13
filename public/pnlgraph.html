@@ -85,6 +85,7 @@
 
       let longChart;
       let shortChart;
+      let currentRows = [];
 
       async function loadData() {
         const date = dateInput.value;
@@ -142,6 +143,8 @@
             statusEl.textContent = `Loaded ${rows.length} rows.`;
           }
 
+          currentRows = rows;
+
           const labels = rows.map((r) => r.timeIst);
           const paperLong = rows.map((r) => r.paperLongCumPnl);
           const paperShort = rows.map((r) => r.paperShortCumPnl);
@@ -196,6 +199,28 @@
                 },
               },
               plugins: {
+                tooltip: {
+                  callbacks: {
+                    afterBody: (ctx) => {
+                      const index = ctx[0].dataIndex;
+                      const row = currentRows[index];
+                      if (!row || !row.tradeSide) return '';
+                      const parts = [];
+                      parts.push(`Trade: ${row.tradeSide}`);
+                      if (row.tradeEntry != null && row.tradeExit != null) {
+                        parts.push(
+                          `Entry: ${row.tradeEntry.toFixed(
+                            2,
+                          )}, Exit: ${row.tradeExit.toFixed(2)}`,
+                        );
+                      }
+                      if (row.tradePnl != null) {
+                        parts.push(`Trade PnL: ${row.tradePnl.toFixed(2)}`);
+                      }
+                      return parts;
+                    },
+                  },
+                },
                 zoom: {
                   zoom: {
                     wheel: { enabled: true },
@@ -251,6 +276,28 @@
                 },
               },
               plugins: {
+                tooltip: {
+                  callbacks: {
+                    afterBody: (ctx) => {
+                      const index = ctx[0].dataIndex;
+                      const row = currentRows[index];
+                      if (!row || !row.tradeSide) return '';
+                      const parts = [];
+                      parts.push(`Trade: ${row.tradeSide}`);
+                      if (row.tradeEntry != null && row.tradeExit != null) {
+                        parts.push(
+                          `Entry: ${row.tradeEntry.toFixed(
+                            2,
+                          )}, Exit: ${row.tradeExit.toFixed(2)}`,
+                        );
+                      }
+                      if (row.tradePnl != null) {
+                        parts.push(`Trade PnL: ${row.tradePnl.toFixed(2)}`);
+                      }
+                      return parts;
+                    },
+                  },
+                },
                 zoom: {
                   zoom: {
                     wheel: { enabled: true },
