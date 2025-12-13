@@ -13,10 +13,10 @@
       .row {
         margin-bottom: 16px;
       }
-      #chart-container {
+      .chart-container {
         width: 100%;
-        max-width: 1000px;
-        height: 500px;
+        max-width: 1400px;
+        height: 600px;
       }
       table {
         border-collapse: collapse;
@@ -45,12 +45,12 @@
     </div>
 
     <h3>Long Side (BUY)</h3>
-    <div id="chart-container">
+    <div class="chart-container">
       <canvas id="longChart"></canvas>
     </div>
 
     <h3>Short Side (SELL)</h3>
-    <div id="chart-container">
+    <div class="chart-container">
       <canvas id="shortChart"></canvas>
     </div>
 
@@ -108,15 +108,17 @@
           let rows = data.rows || [];
 
           // Filter rows to custom "trading day" window:
-          // from 05:30 IST of selected date to 05:30 IST of next day.
+          // from 05:31 IST of selected date to 05:31 IST of next day.
+          // (This avoids the 05:30 reset minute.)
           if (rows.length) {
             const [yearStr, monthStr, dayStr] = date.split('-');
             const year = parseInt(yearStr, 10);
             const month = parseInt(monthStr, 10) - 1;
             const day = parseInt(dayStr, 10);
 
-            const start = new Date(year, month, day, 5, 30, 0);
-            const end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
+            const start = new Date(year, month, day, 5, 31, 0);
+            const endExclusive = new Date(year, month, day, 5, 31, 0);
+            endExclusive.setDate(endExclusive.getDate() + 1);
 
             const parseIst = (timeIst) => {
               // timeIst format: "YYYY-MM-DD HH:MM"
@@ -133,7 +135,7 @@
 
             rows = rows.filter((r) => {
               const dt = parseIst(r.timeIst);
-              return dt >= start && dt < end;
+              return dt >= start && dt < endExclusive;
             });
           }
 
@@ -169,13 +171,6 @@
                   data: paperLong,
                   borderColor: 'blue',
                   fill: false,
-                },
-                {
-                  label: 'Paper SHORT cum',
-                  data: [], // not used on long chart
-                  borderColor: 'green',
-                  fill: false,
-                  hidden: true,
                 },
                 {
                   label: 'Live LONG cum',
@@ -246,13 +241,6 @@
                   data: paperShort,
                   borderColor: 'green',
                   fill: false,
-                },
-                {
-                  label: 'Paper LONG cum',
-                  data: [], // not used on short chart
-                  borderColor: 'blue',
-                  fill: false,
-                  hidden: true,
                 },
                 {
                   label: 'Live SHORT cum',
