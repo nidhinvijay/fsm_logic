@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>BTCUSD PnL Graph</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        margin: 20px;
+      }
+      .row {
+        margin-bottom: 16px;
+      }
+      #chart-container {
+        width: 100%;
+        max-width: 1100px;
+        height: 400px;
+      }
+      table {
+        border-collapse: collapse;
+        margin-top: 20px;
+        font-size: 12px;
+      }
+      th,
+      td {
+        border: 1px solid #ccc;
+        padding: 4px 6px;
+        text-align: right;
+      }
+      th {
+        background: #f0f0f0;
+      }
+    </style>
+  </head>
+  <body>
+    <h2>BTCUSD PnL History (Paper + Live)</h2>
+
+    <div class="row">
+      <label for="dateInput">Date (YYYY-MM-DD): </label>
+      <input id="dateInput" type="date" />
+      <button id="loadBtn">Load</button>
+      <span id="status" style="margin-left: 10px; font-size: 12px;"></span>
+    </div>
+
+    <div id="chart-container">
+      <canvas id="pnlChart"></canvas>
+    </div>
+
+    <h3>Trades (rows where a trade was closed)</h3>
+    <table id="tradesTable">
+      <thead>
+        <tr>
+          <th>Time (IST)</th>
+          <th>Side</th>
+          <th>Entry</th>
+          <th>Exit</th>
+          <th>Trade PnL</th>
+          <th>Live Long Cum</th>
+          <th>Live Short Cum</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+
+    <script>
+      const dateInput = document.getElementById('dateInput');
+      const loadBtn = document.getElementById('loadBtn');
+      const statusEl = document.getElementById('status');
+      const tradesBody = document.querySelector('#tradesTable tbody');
+
+      // default to today
+      const today = new Date();
+      const yyyy = today.getFullYear();
+      const mm = String(today.getMonth() + 1).padStart(2, '0');
+      const dd = String(today.getDate()).padStart(2, '0');
+      dateInput.value = `${yyyy}-${mm}-${dd}`;
+
+      let chart;
+
+      async function loadData() {
+        const date = dateInput.value;
+        if (!date) {
+          statusEl.textContent = 'Please pick a date.';
+          return;
+        }
+
+        statusEl.textContent = 'Loading...';
+
+        try {
+          const res = await fetch(`/pnl-history?date=${encodeURIComponent(date)}`);
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            statusEl.textContent = `Error: ${res.status} ${err.error || ''}`;
+            return;
+          }
+
+          const data = await res.json();
+          const rows = data.rows || [];
+
+          if (!rows.length) {
+            statusEl.textContent = 'No data for this date.';
+          } else {
+            statusEl.textContent = `Loaded ${rows.length} rows.`;
+          }
+
+          const labels = rows.map((r) => r.timeIst);
+          const paperLong = rows.map((r) => r.paperLongCumPnl);
+          const paperShort = rows.map((r) => r.paperShortCumPnl);
+          const liveLong = rows.map((r) => r.liveLongCumPnl);
+          const liveShort = rows.map((r) => r.liveShortCumPnl);
+
+          const ctx = document.getElementById('pnlChart').getContext('2d');
+          if (chart) chart.destroy();
+          chart = new Chart(ctx, {
+            type: 'line',
+            data: {
+              labels,
+              datasets: [
+                {
+                  label: 'Paper LONG cum',
+                  data: paperLong,
+                  borderColor: 'blue',
+                  fill: false,
+                },
+                {
+                  label: 'Paper SHORT cum',
+                  data: paperShort,
+                  borderColor: 'green',
+                  fill: false,
+                },
+                {
+                  label: 'Live LONG cum',
+                  data: liveLong,
+                  borderColor: 'orange',
+                  borderDash: [5, 5],
+                  fill: false,
+                },
+                {
+                  label: 'Live SHORT cum',
+                  data: liveShort,
+                  borderColor: 'red',
+                  borderDash: [5, 5],
+                  fill: false,
+                },
+              ],
+            },
+            options: {
+              responsive: true,
+              interaction: { mode: 'index', intersect: false },
+              stacked: false,
+              scales: {
+                x: {
+                  ticks: { maxRotation: 90, minRotation: 45 },
+                },
+                y: {
+                  title: { display: true, text: 'Cum PnL' },
+                },
+              },
+            },
+          });
+
+          // Fill trades table
+          tradesBody.innerHTML = '';
+          rows
+            .filter((r) => r.tradeSide)
+            .forEach((r) => {
+              const tr = document.createElement('tr');
+              const cells = [
+                r.timeIst,
+                r.tradeSide,
+                r.tradeEntry != null ? r.tradeEntry.toFixed(2) : '',
+                r.tradeExit != null ? r.tradeExit.toFixed(2) : '',
+                r.tradePnl != null ? r.tradePnl.toFixed(2) : '',
+                r.liveLongCumPnl.toFixed(2),
+                r.liveShortCumPnl.toFixed(2),
+              ];
+              cells.forEach((val) => {
+                const td = document.createElement('td');
+                td.textContent = val;
+                tr.appendChild(td);
+              });
+              tradesBody.appendChild(tr);
+            });
+        } catch (err) {
+          console.error(err);
+          statusEl.textContent = 'Error fetching data.';
+        }
+      }
+
+      loadBtn.addEventListener('click', loadData);
+      // auto-load on open
+      loadData();
+    </script>
+  </body>
+  </html>
+

@@ -22,6 +22,7 @@ import {
 } from './paperHooks';
 import { getRecentLogs, logState } from './logger';
 import { closePosition } from './fsmProfitWindow';
+import { loadPnlHistory } from './pnlHistory';
 
 const app = express();
 app.use(
@@ -252,14 +253,24 @@ function writePnlCsvRow(snapshot: PnlSnapshot): void {
 
   const filePath = path.join('logs', `pnl-${datePart}.csv`);
   const header =
-    'timeIst,paperLongCumPnl,paperShortCumPnl,liveLongCumPnl,liveShortCumPnl\n';
+    'timeIst,paperLongCumPnl,paperShortCumPnl,liveLongCumPnl,liveShortCumPnl,tradeSide,tradeEntry,tradeExit,tradePnl\n';
+
+   const trade = snapshot.trade;
+   const tradeSide = trade ? trade.side : '';
+   const tradeEntry = trade ? trade.entryPrice.toFixed(2) : '';
+   const tradeExit = trade ? trade.exitPrice.toFixed(2) : '';
+   const tradePnl = trade ? trade.pnl.toFixed(2) : '';
 
   const line =
     `${minuteKey},` +
     `${snapshot.paperLongCumPnl.toFixed(2)},` +
     `${snapshot.paperShortCumPnl.toFixed(2)},` +
     `${snapshot.liveLongCumPnl.toFixed(2)},` +
-    `${snapshot.liveShortCumPnl.toFixed(2)}\n`;
+    `${snapshot.liveShortCumPnl.toFixed(2)},` +
+    `${tradeSide},` +
+    `${tradeEntry},` +
+    `${tradeExit},` +
+    `${tradePnl}\n`;
 
   if (!fs.existsSync(filePath)) {
     fs.appendFileSync(filePath, header + line);
@@ -865,6 +876,31 @@ app.get('/pnl', (_req, res) => {
     paperShortCumPnl: snapshot.paperShortCumPnl,
     liveLongCumPnl: snapshot.liveLongCumPnl,
     liveShortCumPnl: snapshot.liveShortCumPnl,
+  });
+});
+
+// GET /pnl-history?date=YYYY-MM-DD  → per-minute PnL + trades for a given day
+app.get('/pnl-history', (req, res) => {
+  const { date } = req.query as { date?: string };
+
+  if (!date) {
+    return res
+      .status(400)
+      .json({ error: 'date query param is required as YYYY-MM-DD' });
+  }
+
+  // very light validation
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return res
+      .status(400)
+      .json({ error: 'date must be in format YYYY-MM-DD' });
+  }
+
+  const rows = loadPnlHistory(date);
+
+  return res.json({
+    date,
+    rows,
   });
 });
 
