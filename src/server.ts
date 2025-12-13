@@ -1,4 +1,5 @@
 import express from 'express';
+import cors from 'cors';
 import fetch from 'node-fetch';
 import fs from 'fs';
 import path from 'path';
@@ -23,6 +24,12 @@ import { getRecentLogs, logState } from './logger';
 import { closePosition } from './fsmProfitWindow';
 
 const app = express();
+app.use(
+  cors({
+    origin: ['https://pnlgraph.web.app', 'https://localhost:4200'],
+    credentials: true,
+  }),
+);
 app.use(express.json());
 app.use(express.static('public'));
 
