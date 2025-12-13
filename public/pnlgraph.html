@@ -15,8 +15,8 @@
       }
       #chart-container {
         width: 100%;
-        max-width: 1400px;
-        height: 600px;
+        max-width: 1000px;
+        height: 500px;
       }
       table {
         border-collapse: collapse;
@@ -111,9 +111,9 @@
             const end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
 
             const parseIst = (timeIst) => {
-              // timeIst format: "DD-MM-YYYY HH:MM"
+              // timeIst format: "YYYY-MM-DD HH:MM"
               const [dPart, tPart] = timeIst.split(' ');
-              const [dStr, mStr, yStr] = dPart.split('-');
+              const [yStr, mStr, dStr] = dPart.split('-');
               const [hhStr, mmStr] = (tPart || '00:00').split(':');
               const yy = parseInt(yStr, 10);
               const mm = parseInt(mStr, 10) - 1;
