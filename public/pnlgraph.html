@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <title>BTCUSD PnL Graph</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
     <style>
       body {
         font-family: Arial, sans-serif;
@@ -14,8 +15,8 @@
       }
       #chart-container {
         width: 100%;
-        max-width: 1100px;
-        height: 400px;
+        max-width: 1400px;
+        height: 600px;
       }
       table {
         border-collapse: collapse;
@@ -96,7 +97,37 @@
           }
 
           const data = await res.json();
-          const rows = data.rows || [];
+          let rows = data.rows || [];
+
+          // Filter rows to custom "trading day" window:
+          // from 05:30 IST of selected date to 05:30 IST of next day.
+          if (rows.length) {
+            const [yearStr, monthStr, dayStr] = date.split('-');
+            const year = parseInt(yearStr, 10);
+            const month = parseInt(monthStr, 10) - 1;
+            const day = parseInt(dayStr, 10);
+
+            const start = new Date(year, month, day, 5, 30, 0);
+            const end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
+
+            const parseIst = (timeIst) => {
+              // timeIst format: "DD-MM-YYYY HH:MM"
+              const [dPart, tPart] = timeIst.split(' ');
+              const [dStr, mStr, yStr] = dPart.split('-');
+              const [hhStr, mmStr] = (tPart || '00:00').split(':');
+              const yy = parseInt(yStr, 10);
+              const mm = parseInt(mStr, 10) - 1;
+              const dd = parseInt(dStr, 10);
+              const hh = parseInt(hhStr, 10);
+              const mi = parseInt(mmStr, 10);
+              return new Date(yy, mm, dd, hh, mi, 0);
+            };
+
+            rows = rows.filter((r) => {
+              const dt = parseIst(r.timeIst);
+              return dt >= start && dt < end;
+            });
+          }
 
           if (!rows.length) {
             statusEl.textContent = 'No data for this date.';
@@ -157,6 +188,19 @@
                   title: { display: true, text: 'Cum PnL' },
                 },
               },
+              plugins: {
+                zoom: {
+                  zoom: {
+                    wheel: { enabled: true },
+                    pinch: { enabled: true },
+                    mode: 'x',
+                  },
+                  pan: {
+                    enabled: true,
+                    mode: 'x',
+                  },
+                },
+              },
             },
           });
 
@@ -194,4 +238,3 @@
     </script>
   </body>
   </html>
-
