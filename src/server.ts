@@ -729,12 +729,16 @@ app.post('/webhook', (req, res) => {
   const symMatch = message.match(/sym=([A-Z0-9]+)/);
   const stopMatch = message.match(/stopPx=([\d.]+)/);
 
-  const symbol = symMatch?.[1] ?? 'BTCUSD';
+  const rawSymbol = symMatch?.[1] ?? 'BTCUSD';
+  const symbol =
+    rawSymbol === 'BTCUSDT'
+      ? 'BTCUSD'
+      : rawSymbol;
   const stopPx = stopMatch ? Number(stopMatch[1]) : undefined;
 
   if (symbol !== 'BTCUSD') {
-    // for now we only handle BTCUSD
-    return res.json({ message: 'ignored symbol', symbol });
+    // still ignore anything that isn't BTCUSD / BTCUSDT
+    return res.json({ message: 'ignored symbol', symbol: rawSymbol });
   }
 
   const now = Date.now();
