@@ -246,6 +246,11 @@ let lastPnlMinuteKey: string | null = null;
 let lastPnlMinuteSnapshot: PnlSnapshot | null = null;
 
 function writePnlCsvRow(snapshot: PnlSnapshot): void {
+  // Ensure logs folder exists (fresh droplet installs, etc.)
+  if (!fs.existsSync('logs')) {
+    fs.mkdirSync('logs', { recursive: true });
+  }
+
   const istIso = snapshot.eventTsIst;
   const datePart = istIso.slice(0, 10); // YYYY-MM-DD
   const timePart = istIso.slice(11, 16); // HH:MM
@@ -288,7 +293,6 @@ function recordPnlMinute(snapshot: PnlSnapshot): void {
   if (!lastPnlMinuteKey) {
     lastPnlMinuteKey = minuteKey;
     lastPnlMinuteSnapshot = snapshot;
-    writePnlCsvRow(snapshot);
     return;
   }
 
@@ -298,14 +302,17 @@ function recordPnlMinute(snapshot: PnlSnapshot): void {
     return;
   }
 
-  // Minute changed → flush previous snapshot, then start new minute.
-  if (lastPnlMinuteSnapshot) {
-    writePnlCsvRow(lastPnlMinuteSnapshot);
-  }
-
+  // Minute changed → flush previous minute once, then start tracking the new minute.
+  if (lastPnlMinuteSnapshot) writePnlCsvRow(lastPnlMinuteSnapshot);
   lastPnlMinuteKey = minuteKey;
   lastPnlMinuteSnapshot = snapshot;
-  writePnlCsvRow(snapshot);
+}
+
+function flushPnlMinuteSnapshot(): void {
+  if (!lastPnlMinuteSnapshot) return;
+  writePnlCsvRow(lastPnlMinuteSnapshot);
+  lastPnlMinuteKey = null;
+  lastPnlMinuteSnapshot = null;
 }
 
 function checkForNewTrades(): void {
@@ -416,6 +423,8 @@ function runDailyResetIfNeeded(nowUtcMs: number) {
 
     // Log final PnL snapshot for the day
     logPnlSnapshot(buildPnlSnapshot('DAILY_RESET', nowTs));
+    // Ensure the last minute snapshot is persisted before resetting contexts.
+    flushPnlMinuteSnapshot();
 
     // Recreate fresh FSM contexts for new day
     paperLongCtx = createFSM('BTCUSD');
@@ -426,6 +435,10 @@ function runDailyResetIfNeeded(nowUtcMs: number) {
     // Reset trade counters for new contexts
     lastLongTradeCount = paperLongCtx.trades.length;
     lastShortTradeCount = paperShortCtx.trades.length;
+    liveLongCumPnl = 0;
+    liveShortCumPnl = 0;
+    liveLongEntryPrice = null;
+    liveShortEntryPrice = null;
 
     logState('Daily reset at 05:30 IST completed', {
       istDate: istDateKey,
