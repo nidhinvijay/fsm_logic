@@ -54,6 +54,34 @@ let liveShortCumPnl = 0;
 let liveLongEntryPrice: number | null = null;
 let liveShortEntryPrice: number | null = null;
 
+function getLiveLongPnl() {
+  const realized = liveLongCumPnl;
+  let unrealized = 0;
+  if (liveLongEntryPrice != null) {
+    unrealized = currentPrice - liveLongEntryPrice;
+  }
+  const unrealizedRounded = round2(unrealized);
+  return {
+    realized,
+    unrealized: unrealizedRounded,
+    total: round2(realized + unrealizedRounded),
+  };
+}
+
+function getLiveShortPnl() {
+  const realized = liveShortCumPnl;
+  let unrealized = 0;
+  if (liveShortEntryPrice != null) {
+    unrealized = liveShortEntryPrice - currentPrice;
+  }
+  const unrealizedRounded = round2(unrealized);
+  return {
+    realized,
+    unrealized: unrealizedRounded,
+    total: round2(realized + unrealizedRounded),
+  };
+}
+
 // --- External live trading webhook (Bharath) ---
 
 const LIVE_WEBHOOK_URL =
@@ -177,13 +205,14 @@ function getTotalCumPnl(): number {
 }
 
 interface PnlSnapshot {
-  kind: 'TRADE_CLOSE' | 'DAILY_RESET';
+  kind: 'TRADE_CLOSE' | 'DAILY_RESET' | 'MINUTE';
   symbol: string;
   eventTsUtc: string;
   eventTsIst: string;
   paperLongCumPnl: number;
   paperShortCumPnl: number;
   cumPnlTotal: number;
+  // live cum PnL should match paper semantics: realized + unrealized (on currentPrice)
   liveLongCumPnl: number;
   liveShortCumPnl: number;
   trade?: {
@@ -208,6 +237,9 @@ function buildPnlSnapshot(
   const shortPnl = getSideLivePnl(paperShortCtx);
   const totalCumPnl = round2(longPnl.total + shortPnl.total);
 
+  const liveLong = getLiveLongPnl();
+  const liveShort = getLiveShortPnl();
+
   const tradePayload =
     trade && trade.entryPrice != null && trade.exitPrice != null && trade.pnl != null
       ? {
@@ -229,14 +261,19 @@ function buildPnlSnapshot(
     paperLongCumPnl: longPnl.total,
     paperShortCumPnl: shortPnl.total,
     cumPnlTotal: totalCumPnl,
-    liveLongCumPnl,
-    liveShortCumPnl,
+    liveLongCumPnl: liveLong.total,
+    liveShortCumPnl: liveShort.total,
     trade: tradePayload,
   };
 }
 
 function logPnlSnapshot(snapshot: PnlSnapshot): void {
   logState('PnL snapshot', snapshot);
+  // Persist each TRADE_CLOSE snapshot immediately so we never lose trades
+  // even if multiple trades happen in the same minute.
+  if (snapshot.kind === 'TRADE_CLOSE') {
+    writePnlCsvRow(snapshot);
+  }
   recordPnlMinute(snapshot);
 }
 
@@ -298,7 +335,13 @@ function recordPnlMinute(snapshot: PnlSnapshot): void {
 
   if (minuteKey === lastPnlMinuteKey) {
     // Same minute → overwrite in-memory snapshot; no immediate write.
-    lastPnlMinuteSnapshot = snapshot;
+    // Important: don't lose a TRADE_CLOSE marker for the minute just because
+    // a later "MINUTE" heartbeat snapshot arrives.
+    if (lastPnlMinuteSnapshot?.trade && !snapshot.trade) {
+      lastPnlMinuteSnapshot = { ...snapshot, trade: lastPnlMinuteSnapshot.trade };
+    } else {
+      lastPnlMinuteSnapshot = snapshot;
+    }
     return;
   }
 
@@ -313,6 +356,12 @@ function flushPnlMinuteSnapshot(): void {
   writePnlCsvRow(lastPnlMinuteSnapshot);
   lastPnlMinuteKey = null;
   lastPnlMinuteSnapshot = null;
+}
+
+function recordMinuteHeartbeat(nowTs: number): void {
+  // Keep CSV updated even when no trades close for hours.
+  // This should be lightweight (no log spam).
+  recordPnlMinute(buildPnlSnapshot('MINUTE', nowTs));
 }
 
 function checkForNewTrades(): void {
@@ -359,6 +408,9 @@ function buildPaperView(ctx: FSMContext) {
 
 // state for /state endpoint
 function getStateSnapshot() {
+  const liveLong = getLiveLongPnl();
+  const liveShort = getLiveShortPnl();
+
   return {
     feedMode,
     currentPrice,
@@ -373,12 +425,18 @@ function getStateSnapshot() {
       state: liveLongCtx.state,
       position: liveLongCtx.position,
       lockUntilTs: liveLongCtx.lockUntilTs ?? null,
+      realizedCumPnl: liveLong.realized,
+      unrealizedPnl: liveLong.unrealized,
+      cumPnl: liveLong.total,
     },
 
     liveShort: {
       state: liveShortCtx.state,
       position: liveShortCtx.position,
       lockUntilTs: liveShortCtx.lockUntilTs ?? null,
+      realizedCumPnl: liveShort.realized,
+      unrealizedPnl: liveShort.unrealized,
+      cumPnl: liveShort.total,
     },
   };
 }
@@ -553,6 +611,7 @@ async function pollDeltaOnce(): Promise<void> {
 
     // After processing this tick, check if any paper trades just closed
     checkForNewTrades();
+    recordMinuteHeartbeat(now);
   } catch (err) {
     console.error('Delta ticker fetch failed', err);
   }
@@ -643,6 +702,7 @@ setInterval(() => {
 
   // After processing this simulated tick, check for newly closed trades
   checkForNewTrades();
+  recordMinuteHeartbeat(now);
 }, SIM_INTERVAL_MS);
 
 // --- Wire paper → live hooks ---
@@ -837,6 +897,7 @@ app.post('/tick', (req, res) => {
 
   // Manual tick can also close trades; capture any new ones
   checkForNewTrades();
+  recordMinuteHeartbeat(now);
 
   return res.json({
     message: 'Tick processed',

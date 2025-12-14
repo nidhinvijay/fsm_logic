@@ -41,6 +41,10 @@
       <label for="dateInput">Date (YYYY-MM-DD): </label>
       <input id="dateInput" type="date" />
       <button id="loadBtn">Load</button>
+      <label style="margin-left: 12px; font-size: 12px;">
+        <input id="deltaMode" type="checkbox" />
+        Show per-minute change (Δ)
+      </label>
       <span id="status" style="margin-left: 10px; font-size: 12px;"></span>
     </div>
 
@@ -74,6 +78,7 @@
       const dateInput = document.getElementById('dateInput');
       const loadBtn = document.getElementById('loadBtn');
       const statusEl = document.getElementById('status');
+      const deltaModeEl = document.getElementById('deltaMode');
       const tradesBody = document.querySelector('#tradesTable tbody');
 
       // default to today
@@ -86,6 +91,7 @@
       let longChart;
       let shortChart;
       let currentRows = [];
+      let currentChartRows = [];
 
       function addDays(dateStr, days) {
         const [yStr, mStr, dStr] = dateStr.split('-');
@@ -179,11 +185,32 @@
 
           currentRows = rows;
 
-          const labels = rows.map((r) => r.timeIst);
-          const paperLong = rows.map((r) => r.paperLongCumPnl);
-          const paperShort = rows.map((r) => r.paperShortCumPnl);
-          const liveLong = rows.map((r) => r.liveLongCumPnl);
-          const liveShort = rows.map((r) => r.liveShortCumPnl);
+          // Charts should have exactly one point per minute; CSV can have extra rows
+          // (e.g., one row per trade close). Keep the LAST row per minute.
+          const byMinute = new Map();
+          for (const r of rows) byMinute.set(r.timeIst, r);
+          const chartRows = Array.from(byMinute.values()).sort(
+            (a, b) => parseIst(a.timeIst) - parseIst(b.timeIst),
+          );
+          currentChartRows = chartRows;
+
+          const labels = chartRows.map((r) => r.timeIst);
+          const deltaMode = !!deltaModeEl.checked;
+
+          const toDelta = (arr) => {
+            if (!deltaMode) return arr;
+            const out = [];
+            for (let i = 0; i < arr.length; i += 1) {
+              if (i === 0) out.push(0);
+              else out.push(Number((arr[i] - arr[i - 1]).toFixed(2)));
+            }
+            return out;
+          };
+
+          const paperLong = toDelta(chartRows.map((r) => r.paperLongCumPnl));
+          const paperShort = toDelta(chartRows.map((r) => r.paperShortCumPnl));
+          const liveLong = toDelta(chartRows.map((r) => r.liveLongCumPnl));
+          const liveShort = toDelta(chartRows.map((r) => r.liveShortCumPnl));
 
           const longCtx = document.getElementById('longChart').getContext('2d');
           const shortCtx = document
@@ -222,7 +249,10 @@
                   ticks: { maxRotation: 90, minRotation: 45 },
                 },
                 y: {
-                  title: { display: true, text: 'Cum PnL (LONG)' },
+                  title: {
+                    display: true,
+                    text: deltaMode ? 'Δ PnL per minute (LONG)' : 'Cum PnL (LONG)',
+                  },
                 },
               },
               plugins: {
@@ -230,7 +260,7 @@
                   callbacks: {
                     afterBody: (ctx) => {
                       const index = ctx[0].dataIndex;
-                      const row = currentRows[index];
+                      const row = currentChartRows[index];
                       if (!row || !row.tradeSide) return '';
                       const parts = [];
                       parts.push(`Trade: ${row.tradeSide}`);
@@ -292,7 +322,10 @@
                   ticks: { maxRotation: 90, minRotation: 45 },
                 },
                 y: {
-                  title: { display: true, text: 'Cum PnL (SHORT)' },
+                  title: {
+                    display: true,
+                    text: deltaMode ? 'Δ PnL per minute (SHORT)' : 'Cum PnL (SHORT)',
+                  },
                 },
               },
               plugins: {
@@ -300,7 +333,7 @@
                   callbacks: {
                     afterBody: (ctx) => {
                       const index = ctx[0].dataIndex;
-                      const row = currentRows[index];
+                      const row = currentChartRows[index];
                       if (!row || !row.tradeSide) return '';
                       const parts = [];
                       parts.push(`Trade: ${row.tradeSide}`);
@@ -362,6 +395,7 @@
       }
 
       loadBtn.addEventListener('click', loadData);
+      deltaModeEl.addEventListener('change', loadData);
       // auto-load on open
       loadData();
     </script>

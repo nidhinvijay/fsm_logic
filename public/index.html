@@ -173,6 +173,14 @@
           <strong>Lock:</strong>
           <span id="liveLongLockInfo">Not locked</span>
         </p>
+        <p>
+          <strong>PnL (live):</strong>
+          <span id="liveLongPnl">0.00</span>
+          <span style="font-size: 12px; color: #666;">
+            (realized <span id="liveLongRealized">0.00</span> + unrealized
+            <span id="liveLongUnrealized">0.00</span>)
+          </span>
+        </p>
       </div>
 
       <div class="card">
@@ -188,6 +196,14 @@
         <p>
           <strong>Lock:</strong>
           <span id="liveShortLockInfo">Not locked</span>
+        </p>
+        <p>
+          <strong>PnL (live):</strong>
+          <span id="liveShortPnl">0.00</span>
+          <span style="font-size: 12px; color: #666;">
+            (realized <span id="liveShortRealized">0.00</span> + unrealized
+            <span id="liveShortUnrealized">0.00</span>)
+          </span>
         </p>
       </div>
     </div>
@@ -445,11 +461,17 @@
         const pill = document.getElementById(`live${suffix}StatePill`);
         const info = document.getElementById(`live${suffix}PositionInfo`);
         const lockInfo = document.getElementById(`live${suffix}LockInfo`);
+        const pnlEl = document.getElementById(`live${suffix}Pnl`);
+        const realizedEl = document.getElementById(`live${suffix}Realized`);
+        const unrealizedEl = document.getElementById(`live${suffix}Unrealized`);
 
         if (!data) {
           pill.textContent = '-';
           info.textContent = 'No data';
           lockInfo.textContent = 'Not locked';
+          pnlEl.textContent = '0.00';
+          realizedEl.textContent = '0.00';
+          unrealizedEl.textContent = '0.00';
           return;
         }
 
@@ -490,6 +512,15 @@
         } else {
           lockInfo.textContent = 'Not locked';
         }
+
+        const cumPnl = typeof data.cumPnl === 'number' ? data.cumPnl : 0;
+        const realized =
+          typeof data.realizedCumPnl === 'number' ? data.realizedCumPnl : 0;
+        const unrealized =
+          typeof data.unrealizedPnl === 'number' ? data.unrealizedPnl : 0;
+        pnlEl.textContent = cumPnl.toFixed(2);
+        realizedEl.textContent = realized.toFixed(2);
+        unrealizedEl.textContent = unrealized.toFixed(2);
       }
 
       setInterval(fetchState, 2000);
