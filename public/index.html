@@ -229,6 +229,31 @@
     </div>
 
     <div class="card">
+      <h2>Recent Incoming Signals</h2>
+      <p style="font-size: 12px; color: #666;">
+        Shows what this server actually received on <code>/webhook</code> and <code>/signal</code>.
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>Time (IST)</th>
+            <th>Source</th>
+            <th>Action</th>
+            <th>StopPx</th>
+            <th>Raw Symbol</th>
+            <th>Routed To</th>
+            <th>Message</th>
+          </tr>
+        </thead>
+        <tbody id="recentSignalsRows">
+          <tr>
+            <td colspan="7">No signals yet</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
       <h2>FSM Logs</h2>
       <pre id="fsmLogs">-</pre>
     </div>
@@ -251,6 +276,45 @@
         const logs = Array.isArray(data.logs) ? data.logs : [];
         const pre = document.getElementById('fsmLogs');
         pre.textContent = logs.join('\n') || '-';
+      }
+
+      async function fetchRecentSignals() {
+        const res = await fetch('/recent-signals');
+        const data = await res.json();
+        const rows = Array.isArray(data.rows) ? data.rows : [];
+        const tbody = document.getElementById('recentSignalsRows');
+
+        tbody.innerHTML = '';
+        if (!rows.length) {
+          const tr = document.createElement('tr');
+          const td = document.createElement('td');
+          td.colSpan = 7;
+          td.textContent = 'No signals yet';
+          tr.appendChild(td);
+          tbody.appendChild(tr);
+          return;
+        }
+
+        const lastRows = rows.slice(-50); // keep table small
+        lastRows.forEach((r) => {
+          const tr = document.createElement('tr');
+          const cols = [
+            (r.tsIst || '').replace('T', ' ').slice(0, 16),
+            r.source || '-',
+            r.parsedAction || '-',
+            typeof r.stopPx === 'number' ? r.stopPx.toFixed(2) : '',
+            r.rawSymbol || '',
+            r.routedTo || '',
+            (r.rawMessage || r.note || '').slice(0, 120),
+          ];
+          cols.forEach((v, idx) => {
+            const td = document.createElement('td');
+            td.textContent = v;
+            if (idx === 6) td.style.textAlign = 'left';
+            tr.appendChild(td);
+          });
+          tbody.appendChild(tr);
+        });
       }
 
       async function sendSignal(side) {
@@ -525,8 +589,10 @@
 
       setInterval(fetchState, 2000);
       setInterval(fetchLogs, 2000);
+      setInterval(fetchRecentSignals, 2000);
       fetchState();
       fetchLogs();
+      fetchRecentSignals();
     </script>
   </body>
 </html>

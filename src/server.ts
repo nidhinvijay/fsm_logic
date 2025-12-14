@@ -34,6 +34,36 @@ app.use(
 app.use(express.json());
 app.use(express.static('public'));
 
+// --- Recent incoming signals (for UI) ---
+
+interface RecentSignalRow {
+  tsUtc: string;
+  tsIst: string;
+  source: 'TradingView' | 'Manual';
+  httpPath: '/webhook' | '/signal';
+  rawMessage?: string;
+  parsedAction?: 'ENTRY' | 'EXIT' | null;
+  stopPx?: number | null;
+  rawSymbol?: string | null;
+  symbol?: string | null;
+  routedTo?: 'PAPER_LONG_BUY' | 'PAPER_SHORT_SELL' | 'IGNORED' | null;
+  note?: string | null;
+}
+
+const recentSignals: RecentSignalRow[] = [];
+const MAX_RECENT_SIGNALS = 250;
+
+function toIstIso(tsMs: number): string {
+  return new Date(tsMs + 5.5 * 60 * 60 * 1000).toISOString();
+}
+
+function pushRecentSignal(row: RecentSignalRow): void {
+  recentSignals.push(row);
+  if (recentSignals.length > MAX_RECENT_SIGNALS) {
+    recentSignals.splice(0, recentSignals.length - MAX_RECENT_SIGNALS);
+  }
+}
+
 // --- Paper FSMs (separate BUY + SELL) ---
 
 // BUY side (LONG paper FSM)
@@ -770,11 +800,33 @@ app.post('/signal', (req, res) => {
       side,
       ts: now,
     });
+
+    pushRecentSignal({
+      tsUtc: new Date(now).toISOString(),
+      tsIst: toIstIso(now),
+      source: 'Manual',
+      httpPath: '/signal',
+      parsedAction: 'ENTRY',
+      symbol: 'BTCUSD',
+      routedTo: 'PAPER_LONG_BUY',
+      note: 'Manual /signal BUY',
+    });
   } else {
     onSignal(paperShortCtx, {
       symbolId: 'BTCUSD',
       side,
       ts: now,
+    });
+
+    pushRecentSignal({
+      tsUtc: new Date(now).toISOString(),
+      tsIst: toIstIso(now),
+      source: 'Manual',
+      httpPath: '/signal',
+      parsedAction: 'EXIT',
+      symbol: 'BTCUSD',
+      routedTo: 'PAPER_SHORT_SELL',
+      note: 'Manual /signal SELL',
     });
   }
 
@@ -829,6 +881,20 @@ app.post('/webhook', (req, res) => {
 
   if (symbol !== 'BTCUSD') {
     // still ignore anything that isn't BTCUSD / BTCUSDT
+    const nowIgnored = Date.now();
+    pushRecentSignal({
+      tsUtc: new Date(nowIgnored).toISOString(),
+      tsIst: toIstIso(nowIgnored),
+      source: 'TradingView',
+      httpPath: '/webhook',
+      rawMessage: message,
+      parsedAction: isEntry ? 'ENTRY' : isExit ? 'EXIT' : null,
+      stopPx: stopPx ?? null,
+      rawSymbol,
+      symbol,
+      routedTo: 'IGNORED',
+      note: 'Ignored symbol',
+    });
     return res.json({ message: 'ignored symbol', symbol: rawSymbol });
   }
 
@@ -840,6 +906,20 @@ app.post('/webhook', (req, res) => {
       symbolId: 'BTCUSD',
       side: 'BUY',
       ts: now,
+    });
+
+    pushRecentSignal({
+      tsUtc: new Date(now).toISOString(),
+      tsIst: toIstIso(now),
+      source: 'TradingView',
+      httpPath: '/webhook',
+      rawMessage: message,
+      parsedAction: 'ENTRY',
+      stopPx: stopPx ?? null,
+      rawSymbol,
+      symbol: 'BTCUSD',
+      routedTo: 'PAPER_LONG_BUY',
+      note: 'Accepted Entry routed to paper LONG BUY',
     });
 
     return res.json({
@@ -857,12 +937,40 @@ app.post('/webhook', (req, res) => {
       ts: now,
     });
 
+    pushRecentSignal({
+      tsUtc: new Date(now).toISOString(),
+      tsIst: toIstIso(now),
+      source: 'TradingView',
+      httpPath: '/webhook',
+      rawMessage: message,
+      parsedAction: 'EXIT',
+      stopPx: stopPx ?? null,
+      rawSymbol,
+      symbol: 'BTCUSD',
+      routedTo: 'PAPER_SHORT_SELL',
+      note: 'Accepted Exit routed to paper SHORT SELL',
+    });
+
     return res.json({
       message: 'Exit processed as SELL for BTCUSD (paper SHORT)',
       stopPx,
       state: getStateSnapshot(),
     });
   }
+
+  pushRecentSignal({
+    tsUtc: new Date(now).toISOString(),
+    tsIst: toIstIso(now),
+    source: 'TradingView',
+    httpPath: '/webhook',
+    rawMessage: message,
+    parsedAction: null,
+    stopPx: stopPx ?? null,
+    rawSymbol,
+    symbol: 'BTCUSD',
+    routedTo: null,
+    note: 'No condition matched',
+  });
 
   return res.json({
     message: 'Webhook message received but no condition matched',
@@ -938,6 +1046,14 @@ app.get('/state', (_req, res) => {
 // GET /logs  → recent FSM logs for UI
 app.get('/logs', (_req, res) => {
   res.json({ logs: getRecentLogs() });
+});
+
+// GET /recent-signals  → recent incoming TradingView/manual signals
+app.get('/recent-signals', (_req, res) => {
+  res.json({
+    count: recentSignals.length,
+    rows: recentSignals,
+  });
 });
 
 // GET /pnl  → expose current cum PnL that controls live gating
