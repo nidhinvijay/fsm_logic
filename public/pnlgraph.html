@@ -87,6 +87,32 @@
       let shortChart;
       let currentRows = [];
 
+      function addDays(dateStr, days) {
+        const [yStr, mStr, dStr] = dateStr.split('-');
+        const y = parseInt(yStr, 10);
+        const m = parseInt(mStr, 10) - 1;
+        const d = parseInt(dStr, 10);
+        const dt = new Date(y, m, d);
+        dt.setDate(dt.getDate() + days);
+        const yy = dt.getFullYear();
+        const mm = String(dt.getMonth() + 1).padStart(2, '0');
+        const dd = String(dt.getDate()).padStart(2, '0');
+        return `${yy}-${mm}-${dd}`;
+      }
+
+      function parseIst(timeIst) {
+        // timeIst format: "YYYY-MM-DD HH:MM"
+        const [dPart, tPart] = timeIst.split(' ');
+        const [yStr, mStr, dStr] = dPart.split('-');
+        const [hhStr, mmStr] = (tPart || '00:00').split(':');
+        const yy = parseInt(yStr, 10);
+        const mm = parseInt(mStr, 10) - 1;
+        const dd = parseInt(dStr, 10);
+        const hh = parseInt(hhStr, 10);
+        const mi = parseInt(mmStr, 10);
+        return new Date(yy, mm, dd, hh, mi, 0);
+      }
+
       async function loadData() {
         const date = dateInput.value;
         if (!date) {
@@ -97,15 +123,32 @@
         statusEl.textContent = 'Loading...';
 
         try {
-          const res = await fetch(`/pnl-history?date=${encodeURIComponent(date)}`);
-          if (!res.ok) {
-            const err = await res.json().catch(() => ({}));
-            statusEl.textContent = `Error: ${res.status} ${err.error || ''}`;
-            return;
-          }
+          // To show a "trading day" window 05:31 → next day 05:31,
+          // we need to merge two calendar CSVs: selected date + next date.
+          // Example: 2025-12-13 trading day includes 2025-12-14 03:05 IST.
+          const nextDate = addDays(date, 1);
 
-          const data = await res.json();
-          let rows = data.rows || [];
+          const fetchRows = async (dateKey, required) => {
+            const res = await fetch(
+              `/pnl-history?date=${encodeURIComponent(dateKey)}`,
+            );
+            if (!res.ok) {
+              if (required) {
+                const err = await res.json().catch(() => ({}));
+                throw new Error(`${res.status} ${err.error || ''}`);
+              }
+              return [];
+            }
+            const data = await res.json();
+            return data.rows || [];
+          };
+
+          const [rowsA, rowsB] = await Promise.all([
+            fetchRows(date, true),
+            fetchRows(nextDate, false),
+          ]);
+
+          let rows = [...rowsA, ...rowsB];
 
           // Filter rows to custom "trading day" window:
           // from 05:31 IST of selected date to 05:31 IST of next day.
@@ -120,29 +163,18 @@
             const endExclusive = new Date(year, month, day, 5, 31, 0);
             endExclusive.setDate(endExclusive.getDate() + 1);
 
-            const parseIst = (timeIst) => {
-              // timeIst format: "YYYY-MM-DD HH:MM"
-              const [dPart, tPart] = timeIst.split(' ');
-              const [yStr, mStr, dStr] = dPart.split('-');
-              const [hhStr, mmStr] = (tPart || '00:00').split(':');
-              const yy = parseInt(yStr, 10);
-              const mm = parseInt(mStr, 10) - 1;
-              const dd = parseInt(dStr, 10);
-              const hh = parseInt(hhStr, 10);
-              const mi = parseInt(mmStr, 10);
-              return new Date(yy, mm, dd, hh, mi, 0);
-            };
-
-            rows = rows.filter((r) => {
-              const dt = parseIst(r.timeIst);
-              return dt >= start && dt < endExclusive;
-            });
+            rows = rows
+              .filter((r) => {
+                const dt = parseIst(r.timeIst);
+                return dt >= start && dt < endExclusive;
+              })
+              .sort((a, b) => parseIst(a.timeIst) - parseIst(b.timeIst));
           }
 
           if (!rows.length) {
             statusEl.textContent = 'No data for this date.';
           } else {
-            statusEl.textContent = `Loaded ${rows.length} rows.`;
+            statusEl.textContent = `Loaded ${rows.length} rows (from ${date} + ${nextDate}).`;
           }
 
           currentRows = rows;
