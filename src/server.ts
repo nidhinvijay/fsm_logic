@@ -29,6 +29,9 @@ import { INSTRUMENTS_DATA, getInstrumentByTradingViewSymbol } from './instrument
 import { OptionsRuntimeManager } from './optionsRuntime';
 import { loadOptionsHistory } from './optionsHistory';
 import { resolveZerodhaTick } from './zerodhaFeed';
+import { loadEnvOnce } from './loadEnv';
+
+loadEnvOnce();
 
 const app = express();
 app.use(

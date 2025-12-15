@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import { loadEnvOnce, reloadEnv } from '../src/loadEnv';
 import fetch from 'node-fetch';
 import { KiteTicker } from 'kiteconnect';
 import { INSTRUMENTS_DATA } from '../src/instruments';
@@ -12,6 +12,21 @@ function requireEnv(name: string): string {
   const value = process.env[name];
   if (!value) throw new Error(`Missing env var: ${name}`);
   return value;
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForEnv(names: string[]): Promise<void> {
+  loadEnvOnce();
+  while (true) {
+    const missing = names.filter((n) => !process.env[n]);
+    if (missing.length === 0) return;
+    console.log('[zerodha-ticks] waiting for env vars', { missing });
+    await sleep(5000);
+    reloadEnv();
+  }
 }
 
 function getTokens(): number[] {
@@ -43,6 +58,7 @@ async function postTick(params: {
 }
 
 async function main(): Promise<void> {
+  await waitForEnv(['KITE_API_KEY', 'KITE_ACCESS_TOKEN']);
   const apiKey = requireEnv('KITE_API_KEY');
   const accessToken = requireEnv('KITE_ACCESS_TOKEN');
   const tickUrl = process.env.FSM_TICK_URL ?? 'http://localhost:3000/zerodha/tick';
@@ -123,4 +139,3 @@ main().catch((e) => {
   console.error('[zerodha-ticks] fatal', String(e));
   process.exit(1);
 });
-
