@@ -229,6 +229,31 @@
     </div>
 
     <div class="card">
+      <h2>Live Trade Events (BTCUSD)</h2>
+      <p style="font-size: 12px; color: #666;">
+        Shows live OPEN/CLOSE events (what we sent to Bharath).
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>Time (IST)</th>
+            <th>Side</th>
+            <th>Action</th>
+            <th>Entry</th>
+            <th>Exit</th>
+            <th>Trade PnL</th>
+            <th>Cum After</th>
+          </tr>
+        </thead>
+        <tbody id="liveTradeRows">
+          <tr>
+            <td colspan="7">No live trades yet</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
       <h2>Recent Incoming Signals</h2>
       <p style="font-size: 12px; color: #666;">
         Shows what this server actually received on <code>/webhook</code> and <code>/signal</code>.
@@ -519,6 +544,42 @@
           null,
           2,
         );
+
+        // Live trade events
+        const liveTbody = document.getElementById('liveTradeRows');
+        const liveRows = Array.isArray(state.liveTradeEvents)
+          ? state.liveTradeEvents
+          : [];
+        liveTbody.innerHTML = '';
+        if (!liveRows.length) {
+          const row = document.createElement('tr');
+          const cell = document.createElement('td');
+          cell.colSpan = 7;
+          cell.textContent = 'No live trades yet';
+          row.appendChild(cell);
+          liveTbody.appendChild(row);
+        } else {
+          const lastRows = liveRows.slice(-30).reverse();
+          lastRows.forEach((r) => {
+            const row = document.createElement('tr');
+            const cols = [
+              (r.tsIst || '').replace('T', ' ').slice(0, 16),
+              r.side || '',
+              r.action || '',
+              typeof r.entryPrice === 'number' ? r.entryPrice.toFixed(2) : '',
+              typeof r.exitPrice === 'number' ? r.exitPrice.toFixed(2) : '',
+              typeof r.tradePnl === 'number' ? r.tradePnl.toFixed(2) : '',
+              typeof r.cumPnlAfter === 'number' ? r.cumPnlAfter.toFixed(2) : '',
+            ];
+            cols.forEach((v, idx) => {
+              const td = document.createElement('td');
+              td.textContent = v;
+              if (idx === 0) td.style.textAlign = 'left';
+              row.appendChild(td);
+            });
+            liveTbody.appendChild(row);
+          });
+        }
       }
 
       function renderLiveSide(suffix, data) {

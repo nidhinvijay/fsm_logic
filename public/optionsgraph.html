@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Options PnL Graph</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        margin: 20px;
+      }
+      .row {
+        margin-bottom: 16px;
+      }
+      .chart-container {
+        width: 100%;
+        max-width: 1400px;
+        height: 600px;
+      }
+      table {
+        border-collapse: collapse;
+        margin-top: 20px;
+        font-size: 12px;
+      }
+      th,
+      td {
+        border: 1px solid #ccc;
+        padding: 4px 6px;
+        text-align: right;
+      }
+      th {
+        background: #f0f0f0;
+      }
+      td.left,
+      th.left {
+        text-align: left;
+      }
+    </style>
+  </head>
+  <body>
+    <h2>Options PnL History (Paper + Live)</h2>
+
+    <div class="row">
+      <label for="symbolSelect">Symbol: </label>
+      <select id="symbolSelect"></select>
+      <label for="dateInput" style="margin-left: 10px;">Date (YYYY-MM-DD): </label>
+      <input id="dateInput" type="date" />
+      <button id="loadBtn">Load</button>
+      <label style="margin-left: 12px; font-size: 12px;">
+        <input id="deltaMode" type="checkbox" />
+        Show per-minute change (Δ)
+      </label>
+      <span id="status" style="margin-left: 10px; font-size: 12px;"></span>
+    </div>
+
+    <div class="row" style="font-size: 12px; color: #444;">
+      Trading-day window is <b>05:31 IST → next day 05:31 IST</b> (to avoid the 05:30 reset minute).
+    </div>
+
+    <h3>Cumulative PnL</h3>
+    <div class="chart-container">
+      <canvas id="cumChart"></canvas>
+    </div>
+
+    <h3>Trades (rows where a trade was closed)</h3>
+    <table id="tradesTable">
+      <thead>
+        <tr>
+          <th class="left">Time (IST)</th>
+          <th>Side</th>
+          <th>Entry</th>
+          <th>Exit</th>
+          <th>Trade PnL</th>
+          <th>Paper Cum</th>
+          <th>Live Cum</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+
+    <script>
+      const symbolSelect = document.getElementById('symbolSelect');
+      const dateInput = document.getElementById('dateInput');
+      const loadBtn = document.getElementById('loadBtn');
+      const statusEl = document.getElementById('status');
+      const deltaModeEl = document.getElementById('deltaMode');
+      const tradesBody = document.querySelector('#tradesTable tbody');
+
+      let chart;
+      let instruments = [];
+
+      function addDays(dateStr, days) {
+        const [yStr, mStr, dStr] = dateStr.split('-');
+        const y = parseInt(yStr, 10);
+        const m = parseInt(mStr, 10) - 1;
+        const d = parseInt(dStr, 10);
+        const dt = new Date(y, m, d);
+        dt.setDate(dt.getDate() + days);
+        const yy = dt.getFullYear();
+        const mm = String(dt.getMonth() + 1).padStart(2, '0');
+        const dd = String(dt.getDate()).padStart(2, '0');
+        return `${yy}-${mm}-${dd}`;
+      }
+
+      function parseIst(timeIst) {
+        // timeIst format: "YYYY-MM-DD HH:MM"
+        const [dPart, tPart] = timeIst.split(' ');
+        const [yStr, mStr, dStr] = dPart.split('-');
+        const [hhStr, mmStr] = (tPart || '00:00').split(':');
+        const yy = parseInt(yStr, 10);
+        const mm = parseInt(mStr, 10) - 1;
+        const dd = parseInt(dStr, 10);
+        const hh = parseInt(hhStr, 10);
+        const mi = parseInt(mmStr, 10);
+        return new Date(yy, mm, dd, hh, mi, 0);
+      }
+
+      function fmtNum(v) {
+        const n = Number(v);
+        if (!Number.isFinite(n)) return '';
+        return n.toFixed(2);
+      }
+
+      function buildChart(canvasId, labels, datasets) {
+        const ctx = document.getElementById(canvasId).getContext('2d');
+        if (chart) chart.destroy();
+        chart = new Chart(ctx, {
+          type: 'line',
+          data: { labels, datasets },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+              legend: { position: 'top' },
+              zoom: {
+                zoom: {
+                  wheel: { enabled: true },
+                  pinch: { enabled: true },
+                  mode: 'x',
+                },
+                pan: { enabled: true, mode: 'x' },
+              },
+              tooltip: { mode: 'index', intersect: false },
+            },
+            interaction: { mode: 'index', intersect: false },
+            scales: {
+              x: {
+                ticks: {
+                  maxRotation: 60,
+                  minRotation: 60,
+                  callback: function (value) {
+                    const label = this.getLabelForValue(value);
+                    const parts = String(label).split(' ');
+                    return parts.length === 2 ? parts[1] : label;
+                  },
+                },
+              },
+              y: {
+                title: {
+                  display: true,
+                  text: deltaModeEl.checked ? 'Δ PnL per minute' : 'Cum PnL',
+                },
+              },
+            },
+          },
+        });
+      }
+
+      async function loadInstruments() {
+        const res = await fetch('/options/instruments');
+        const data = await res.json();
+        instruments = data.instruments || [];
+        symbolSelect.innerHTML = '';
+        for (const inst of instruments) {
+          const opt = document.createElement('option');
+          opt.value = inst.tradingview;
+          opt.textContent = inst.tradingview;
+          symbolSelect.appendChild(opt);
+        }
+      }
+
+      async function loadData() {
+        const date = dateInput.value;
+        const symbol = symbolSelect.value;
+        if (!date || !symbol) {
+          statusEl.textContent = 'Pick a symbol and date.';
+          return;
+        }
+
+        statusEl.textContent = 'Loading...';
+        tradesBody.innerHTML = '';
+
+        try {
+          const nextDate = addDays(date, 1);
+
+          const fetchRows = async (dateKey, required) => {
+            const url = `/options/pnl-history?symbol=${encodeURIComponent(
+              symbol,
+            )}&date=${encodeURIComponent(dateKey)}`;
+            const res = await fetch(url);
+            if (!res.ok) {
+              if (required) {
+                const err = await res.json().catch(() => ({}));
+                throw new Error(`${res.status} ${err.error || ''}`);
+              }
+              return [];
+            }
+            const data = await res.json();
+            return data.rows || [];
+          };
+
+          const [rowsA, rowsB] = await Promise.all([
+            fetchRows(date, true),
+            fetchRows(nextDate, false),
+          ]);
+
+          let rows = [...rowsA, ...rowsB];
+
+          const [yearStr, monthStr, dayStr] = date.split('-');
+          const year = parseInt(yearStr, 10);
+          const month = parseInt(monthStr, 10) - 1;
+          const day = parseInt(dayStr, 10);
+
+          const start = new Date(year, month, day, 5, 31, 0);
+          const endExclusive = new Date(year, month, day, 5, 31, 0);
+          endExclusive.setDate(endExclusive.getDate() + 1);
+
+          rows = rows
+            .filter((r) => {
+              const dt = parseIst(r.timeIst);
+              return dt >= start && dt < endExclusive;
+            })
+            .sort((a, b) => parseIst(a.timeIst) - parseIst(b.timeIst));
+
+          if (!rows.length) {
+            statusEl.textContent = 'No data for this date.';
+          } else {
+            statusEl.textContent = `Loaded ${rows.length} rows (from ${date} + ${nextDate}).`;
+          }
+
+          // Charts should have exactly one point per minute; keep the LAST row per minute.
+          const byMinute = new Map();
+          for (const r of rows) byMinute.set(r.timeIst, r);
+          const chartRows = Array.from(byMinute.values()).sort(
+            (a, b) => parseIst(a.timeIst) - parseIst(b.timeIst),
+          );
+
+          const labels = chartRows.map((r) => r.timeIst);
+          const deltaMode = !!deltaModeEl.checked;
+
+          const toDelta = (arr) => {
+            if (!deltaMode) return arr;
+            const out = [];
+            for (let i = 0; i < arr.length; i += 1) {
+              if (i === 0) out.push(0);
+              else out.push(Number((arr[i] - arr[i - 1]).toFixed(2)));
+            }
+            return out;
+          };
+
+          const paperCum = toDelta(chartRows.map((r) => r.paperCumPnl));
+          const liveCum = toDelta(chartRows.map((r) => r.liveCumPnl));
+
+          buildChart('cumChart', labels, [
+            {
+              label: 'Paper cum',
+              data: paperCum,
+              borderColor: 'rgb(54, 162, 235)',
+              backgroundColor: 'rgba(54, 162, 235, 0.1)',
+              borderWidth: 2,
+              pointRadius: 2,
+              tension: 0.1,
+            },
+            {
+              label: 'Live cum',
+              data: liveCum,
+              borderColor: 'rgb(255, 159, 64)',
+              backgroundColor: 'rgba(255, 159, 64, 0.1)',
+              borderDash: [6, 4],
+              borderWidth: 2,
+              pointRadius: 2,
+              tension: 0.1,
+            },
+          ]);
+
+          // Trades table: show every row that has tradePnl
+          for (const r of rows) {
+            if (r.tradePnl == null) continue;
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+              <td class="left">${r.timeIst}</td>
+              <td>${r.tradeSide || ''}</td>
+              <td>${r.tradeEntry != null ? fmtNum(r.tradeEntry) : ''}</td>
+              <td>${r.tradeExit != null ? fmtNum(r.tradeExit) : ''}</td>
+              <td>${r.tradePnl != null ? fmtNum(r.tradePnl) : ''}</td>
+              <td>${fmtNum(r.paperCumPnl)}</td>
+              <td>${fmtNum(r.liveCumPnl)}</td>
+            `;
+            tradesBody.appendChild(tr);
+          }
+        } catch (e) {
+          statusEl.textContent = `Error: ${String(e)}`;
+        }
+      }
+
+      async function init() {
+        // default to today
+        const today = new Date();
+        const yyyy = today.getFullYear();
+        const mm = String(today.getMonth() + 1).padStart(2, '0');
+        const dd = String(today.getDate()).padStart(2, '0');
+        dateInput.value = `${yyyy}-${mm}-${dd}`;
+
+        await loadInstruments();
+
+        const params = new URLSearchParams(window.location.search);
+        const sym = params.get('symbol');
+        const date = params.get('date');
+        if (sym) symbolSelect.value = sym;
+        if (date) dateInput.value = date;
+
+        await loadData();
+      }
+
+      loadBtn.addEventListener('click', loadData);
+      deltaModeEl.addEventListener('change', loadData);
+      symbolSelect.addEventListener('change', loadData);
+
+      init();
+    </script>
+  </body>
+</html>
+

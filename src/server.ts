@@ -3,6 +3,8 @@ import cors from 'cors';
 import fetch from 'node-fetch';
 import fs from 'fs';
 import path from 'path';
+import { execSync } from 'child_process';
+import { KiteConnect } from 'kiteconnect';
 import { createFSM } from './fsmInit';
 import { onSignal, onTick } from './fsmEngine';
 import { FSMContext } from './fsmStates';
@@ -23,6 +25,10 @@ import {
 import { getRecentLogs, logState } from './logger';
 import { closePosition } from './fsmProfitWindow';
 import { loadPnlHistory } from './pnlHistory';
+import { INSTRUMENTS_DATA, getInstrumentByTradingViewSymbol } from './instruments';
+import { OptionsRuntimeManager } from './optionsRuntime';
+import { loadOptionsHistory } from './optionsHistory';
+import { resolveZerodhaTick } from './zerodhaFeed';
 
 const app = express();
 app.use(
@@ -36,6 +42,49 @@ app.use(express.json());
 app.use(express.text({ type: 'text/plain' }));
 app.use(express.static('public'));
 
+function upsertEnvLine(contents: string, key: string, value: string): string {
+  const lines = contents.split(/\r?\n/);
+  const prefix = `${key}=`;
+  let found = false;
+
+  const next = lines.map((line) => {
+    if (line.startsWith(prefix)) {
+      found = true;
+      return `${key}=${value}`;
+    }
+    return line;
+  });
+
+  if (!found) {
+    if (next.length && next[next.length - 1].trim() !== '') next.push('');
+    next.push(`${key}=${value}`);
+  }
+
+  return next.join('\n');
+}
+
+function writeZerodhaEnv(params: {
+  envPath: string;
+  apiKey: string;
+  apiSecret: string;
+  accessToken: string;
+}): void {
+  const existing = fs.existsSync(params.envPath)
+    ? fs.readFileSync(params.envPath, 'utf8')
+    : '';
+  let updated = existing;
+  updated = upsertEnvLine(updated, 'KITE_API_KEY', params.apiKey);
+  updated = upsertEnvLine(updated, 'KITE_API_SECRET', params.apiSecret);
+  updated = upsertEnvLine(updated, 'KITE_ACCESS_TOKEN', params.accessToken);
+  updated = upsertEnvLine(
+    updated,
+    'KITE_ACCESS_TOKEN_GENERATED_AT_UTC',
+    new Date().toISOString(),
+  );
+
+  fs.writeFileSync(params.envPath, updated, 'utf8');
+}
+
 // --- Recent incoming signals (for UI) ---
 
 interface RecentSignalRow {
@@ -48,7 +97,7 @@ interface RecentSignalRow {
   stopPx?: number | null;
   rawSymbol?: string | null;
   symbol?: string | null;
-  routedTo?: 'PAPER_LONG_BUY' | 'PAPER_SHORT_SELL' | 'IGNORED' | null;
+  routedTo?: 'PAPER_LONG_BUY' | 'PAPER_SHORT_SELL' | 'OPTIONS' | 'IGNORED' | null;
   note?: string | null;
 }
 
@@ -72,6 +121,9 @@ function pushRecentSignal(row: RecentSignalRow): void {
 let paperLongCtx: FSMContext = createFSM('BTCUSD');
 // SELL side (SHORT paper FSM)
 let paperShortCtx: FSMContext = createFSM('BTCUSD');
+
+// --- Indian Options runtimes (per instrument) ---
+const optionsManager = new OptionsRuntimeManager(INSTRUMENTS_DATA);
 
 // --- Live FSMs (LONG + SHORT) ---
 
@@ -156,32 +208,103 @@ async function sendLiveWebhookMessage(
 
 // Helpers to open/close live trades and maintain realized cum PnL per side.
 
+type LiveTradeRow = {
+  tsIst: string;
+  tsUtc: string;
+  side: 'LONG' | 'SHORT';
+  action: 'OPEN' | 'CLOSE';
+  entryPrice: number | null;
+  exitPrice: number | null;
+  tradePnl: number | null;
+  cumPnlAfter: number;
+};
+
+const MAX_LIVE_TRADE_EVENTS = 200;
+const liveTradeEvents: LiveTradeRow[] = [];
+
+function pushLiveTradeEvent(e: LiveTradeRow): void {
+  liveTradeEvents.push(e);
+  if (liveTradeEvents.length > MAX_LIVE_TRADE_EVENTS) {
+    liveTradeEvents.splice(0, liveTradeEvents.length - MAX_LIVE_TRADE_EVENTS);
+  }
+}
+
 function openLiveLong(entryPrice: number): void {
+  const now = Date.now();
   liveLongEntryPrice = entryPrice;
+  if (!liveLongCtx.position.openedAt) liveLongCtx.position.openedAt = now;
+  pushLiveTradeEvent({
+    tsUtc: new Date(now).toISOString(),
+    tsIst: toIstIso(now),
+    side: 'LONG',
+    action: 'OPEN',
+    entryPrice,
+    exitPrice: null,
+    tradePnl: null,
+    cumPnlAfter: liveLongCumPnl,
+  });
   void sendLiveWebhookMessage('ENTRY', 'BTCUSD', entryPrice);
 }
 
 function closeLiveLong(exitPrice: number): void {
+  const now = Date.now();
+  const entry = liveLongEntryPrice;
+  let pnl: number | null = null;
   if (liveLongEntryPrice != null) {
-    const pnl = round2(exitPrice - liveLongEntryPrice);
+    pnl = round2(exitPrice - liveLongEntryPrice);
     liveLongCumPnl = round2(liveLongCumPnl + pnl);
   }
   liveLongEntryPrice = null;
+  pushLiveTradeEvent({
+    tsUtc: new Date(now).toISOString(),
+    tsIst: toIstIso(now),
+    side: 'LONG',
+    action: 'CLOSE',
+    entryPrice: entry,
+    exitPrice,
+    tradePnl: pnl,
+    cumPnlAfter: liveLongCumPnl,
+  });
   void sendLiveWebhookMessage('EXIT', 'BTCUSD', exitPrice);
 }
 
 function openLiveShort(entryPrice: number): void {
+  const now = Date.now();
   liveShortEntryPrice = entryPrice;
+  if (!liveShortCtx.position.openedAt) liveShortCtx.position.openedAt = now;
+  pushLiveTradeEvent({
+    tsUtc: new Date(now).toISOString(),
+    tsIst: toIstIso(now),
+    side: 'SHORT',
+    action: 'OPEN',
+    entryPrice,
+    exitPrice: null,
+    tradePnl: null,
+    cumPnlAfter: liveShortCumPnl,
+  });
   // Open SHORT → SELL
   void sendLiveWebhookMessage('EXIT', 'BTCUSD', entryPrice);
 }
 
 function closeLiveShort(exitPrice: number): void {
+  const now = Date.now();
+  const entry = liveShortEntryPrice;
+  let pnl: number | null = null;
   if (liveShortEntryPrice != null) {
-    const pnl = round2(liveShortEntryPrice - exitPrice);
+    pnl = round2(liveShortEntryPrice - exitPrice);
     liveShortCumPnl = round2(liveShortCumPnl + pnl);
   }
   liveShortEntryPrice = null;
+  pushLiveTradeEvent({
+    tsUtc: new Date(now).toISOString(),
+    tsIst: toIstIso(now),
+    side: 'SHORT',
+    action: 'CLOSE',
+    entryPrice: entry,
+    exitPrice,
+    tradePnl: pnl,
+    cumPnlAfter: liveShortCumPnl,
+  });
   // Close SHORT → BUY
   void sendLiveWebhookMessage('ENTRY', 'BTCUSD', exitPrice);
 }
@@ -468,6 +591,8 @@ function getStateSnapshot() {
       unrealizedPnl: liveShort.unrealized,
       cumPnl: liveShort.total,
     },
+
+    liveTradeEvents,
   };
 }
 
@@ -519,6 +644,7 @@ function runDailyResetIfNeeded(nowUtcMs: number) {
     paperShortCtx = createFSM('BTCUSD');
     liveLongCtx = createLiveContext('BTCUSD-LONG');
     liveShortCtx = createLiveContext('BTCUSD-SHORT');
+    optionsManager.resetAll(nowTs);
 
     // Reset trade counters for new contexts
     lastLongTradeCount = paperLongCtx.trades.length;
@@ -735,6 +861,36 @@ setInterval(() => {
   recordMinuteHeartbeat(now);
 }, SIM_INTERVAL_MS);
 
+// --- Zerodha tick ingest (options) ---
+// Zerodha can be integrated via a separate process that POSTs token+ltp here.
+app.post('/zerodha/tick', (req, res) => {
+  const body = req.body as { token?: number; ltp?: number; ts?: number };
+  const token = body.token;
+  const ltp = body.ltp;
+  const ts = typeof body.ts === 'number' ? body.ts : Date.now();
+
+  if (typeof token !== 'number' || !Number.isFinite(token)) {
+    return res.status(400).json({ error: 'token must be a number' });
+  }
+  if (typeof ltp !== 'number' || !Number.isFinite(ltp)) {
+    return res.status(400).json({ error: 'ltp must be a number' });
+  }
+
+  const resolved = resolveZerodhaTick({ token, ltp, ts });
+  if (!resolved) {
+    return res.status(404).json({ error: 'unknown token', token });
+  }
+
+  optionsManager.handleTickBySymbol(resolved.symbolId, resolved.ltp, resolved.ts);
+
+  return res.json({
+    ok: true,
+    symbolId: resolved.symbolId,
+    ltp: resolved.ltp,
+    ts,
+  });
+});
+
 // --- Wire paper → live hooks ---
 
 // when paper LONG opens, notify liveLong
@@ -883,22 +1039,70 @@ app.post('/webhook', (req, res) => {
   const stopPx = stopMatch ? Number(stopMatch[1]) : undefined;
 
   if (symbol !== 'BTCUSD') {
-    // still ignore anything that isn't BTCUSD / BTCUSDT
-    const nowIgnored = Date.now();
+    const instrument = getInstrumentByTradingViewSymbol(symbol);
+    if (!instrument) {
+      const nowIgnored = Date.now();
+      pushRecentSignal({
+        tsUtc: new Date(nowIgnored).toISOString(),
+        tsIst: toIstIso(nowIgnored),
+        source: 'TradingView',
+        httpPath: '/webhook',
+        rawMessage: message,
+        parsedAction: isEntry ? 'ENTRY' : isExit ? 'EXIT' : null,
+        stopPx: stopPx ?? null,
+        rawSymbol,
+        symbol,
+        routedTo: 'IGNORED',
+        note: 'Ignored symbol',
+      });
+      return res.json({ message: 'ignored symbol', symbol: rawSymbol });
+    }
+
+    const nowOpt = Date.now();
+    const action = isEntry ? 'ENTRY' : isExit ? 'EXIT' : null;
+    if (!action) {
+      pushRecentSignal({
+        tsUtc: new Date(nowOpt).toISOString(),
+        tsIst: toIstIso(nowOpt),
+        source: 'TradingView',
+        httpPath: '/webhook',
+        rawMessage: message,
+        parsedAction: null,
+        stopPx: stopPx ?? null,
+        rawSymbol,
+        symbol: instrument.tradingview,
+        routedTo: 'OPTIONS',
+        note: 'Options webhook received but no condition matched',
+      });
+      return res.json({ message: 'no condition matched', symbol });
+    }
+
+    const result = optionsManager.handleTvSignal(
+      instrument.tradingview,
+      action,
+      nowOpt,
+    );
+
     pushRecentSignal({
-      tsUtc: new Date(nowIgnored).toISOString(),
-      tsIst: toIstIso(nowIgnored),
+      tsUtc: new Date(nowOpt).toISOString(),
+      tsIst: toIstIso(nowOpt),
       source: 'TradingView',
       httpPath: '/webhook',
       rawMessage: message,
-      parsedAction: isEntry ? 'ENTRY' : isExit ? 'EXIT' : null,
+      parsedAction: action,
       stopPx: stopPx ?? null,
       rawSymbol,
-      symbol,
-      routedTo: 'IGNORED',
-      note: 'Ignored symbol',
+      symbol: instrument.tradingview,
+      routedTo: 'OPTIONS',
+      note: `Options routed (${result.kind})`,
     });
-    return res.json({ message: 'ignored symbol', symbol: rawSymbol });
+
+    return res.json({
+      message: 'Options webhook processed',
+      symbol: instrument.tradingview,
+      stopPx,
+      result,
+    });
   }
 
   const now = Date.now();
@@ -1043,7 +1247,10 @@ app.post('/auto', (req, res) => {
 
 // GET /state
 app.get('/state', (_req, res) => {
-  res.json(getStateSnapshot());
+  res.json({
+    ...getStateSnapshot(),
+    options: optionsManager.getSnapshots(),
+  });
 });
 
 // GET /logs  → recent FSM logs for UI
@@ -1057,6 +1264,87 @@ app.get('/recent-signals', (_req, res) => {
     count: recentSignals.length,
     rows: recentSignals,
   });
+});
+
+// GET /options/instruments → list configured Indian option instruments
+app.get('/options/instruments', (_req, res) => {
+  res.json({ instruments: INSTRUMENTS_DATA });
+});
+
+// GET /options/state → current paper/live PnL + state per instrument
+app.get('/options/state', (_req, res) => {
+  res.json({ rows: optionsManager.getSnapshots() });
+});
+
+// GET /zerodha/callback
+// Zerodha redirects here after login, with request_token in the query string.
+// This endpoint can generate an access_token automatically, write it to the env file,
+// and restart the zerodha-ticks PM2 process.
+app.get('/zerodha/callback', async (req, res) => {
+  const requestToken = String((req.query as any).request_token || '');
+  const callbackToken = process.env.ZERODHA_CALLBACK_TOKEN;
+  const providedToken = String((req.query as any).token || '');
+
+  if (callbackToken && providedToken !== callbackToken) {
+    return res.status(403).send('Forbidden');
+  }
+
+  if (!requestToken) {
+    return res.status(400).send('Missing request_token');
+  }
+
+  const apiKey = process.env.KITE_API_KEY;
+  const apiSecret = process.env.KITE_API_SECRET;
+  if (!apiKey || !apiSecret) {
+    return res
+      .status(500)
+      .send('Server missing KITE_API_KEY / KITE_API_SECRET env vars');
+  }
+
+  const envPath =
+    process.env.ZERODHA_ENV_PATH ?? path.resolve(process.cwd(), '.env.zerodha');
+
+  try {
+    const kc = new KiteConnect({ api_key: apiKey } as any);
+    const response = await kc.generateSession(requestToken, apiSecret);
+    const accessToken = String((response as any).access_token || '');
+    if (!accessToken) throw new Error('generateSession returned no access_token');
+
+    writeZerodhaEnv({
+      envPath,
+      apiKey,
+      apiSecret,
+      accessToken,
+    });
+
+    // Restart zerodha ticks process so it picks up the new access token.
+    const pm2Name = process.env.ZERODHA_PM2_NAME ?? 'zerodha-ticks';
+    const doRestart = process.env.ZERODHA_PM2_RESTART !== '0';
+
+    let restartMsg = 'skipped';
+    if (doRestart) {
+      try {
+        execSync(`pm2 restart ${pm2Name}`, { stdio: 'ignore' });
+        restartMsg = `restarted ${pm2Name}`;
+      } catch (e) {
+        restartMsg = `restart failed: ${String(e)}`;
+      }
+    }
+
+    const html = `<!doctype html>
+<html><head><meta charset="utf-8"><title>Zerodha Session</title></head>
+<body style="font-family: Arial, sans-serif; margin: 20px;">
+  <h2>Zerodha session updated</h2>
+  <p><b>Env path:</b> <code>${envPath}</code></p>
+  <p><b>PM2:</b> ${restartMsg}</p>
+  <p style="font-size: 12px; color: #555;">
+    request_token received and access_token written. You can close this tab.
+  </p>
+</body></html>`;
+    return res.status(200).send(html);
+  } catch (e) {
+    return res.status(500).send(`Failed to generate session: ${String(e)}`);
+  }
 });
 
 // GET /pnl  → expose current cum PnL that controls live gating
@@ -1095,6 +1383,31 @@ app.get('/pnl-history', (req, res) => {
     date,
     rows,
   });
+});
+
+// GET /options/pnl-history?symbol=<TradingViewSymbol>&date=YYYY-MM-DD
+// Returns per-minute rows + trade-close rows for a single options instrument.
+app.get('/options/pnl-history', (req, res) => {
+  const { date, symbol } = req.query as { date?: string; symbol?: string };
+
+  if (!symbol) {
+    return res
+      .status(400)
+      .json({ error: 'symbol query param is required (TradingView symbol)' });
+  }
+  if (!date) {
+    return res
+      .status(400)
+      .json({ error: 'date query param is required as YYYY-MM-DD' });
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return res
+      .status(400)
+      .json({ error: 'date must be in format YYYY-MM-DD' });
+  }
+
+  const rows = loadOptionsHistory({ tradingview: symbol, dateKey: date });
+  return res.json({ symbol, date, rows });
 });
 
 // Start server

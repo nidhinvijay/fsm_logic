@@ -5,7 +5,9 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "ts-node src/server.ts",
-    "summary": "ts-node scripts/dailySummary.ts"
+    "summary": "ts-node scripts/dailySummary.ts",
+    "zerodha:ticks": "ts-node scripts/zerodhaTicks.ts",
+    "zerodha:session": "ts-node scripts/zerodhaSession.ts"
   },
   "keywords": [],
   "author": "",
@@ -23,7 +25,9 @@
   "dependencies": {
     "cors": "^2.8.5",
     "@types/node-fetch": "^2.6.13",
+    "dotenv": "^16.6.1",
     "express": "^5.2.1",
+    "kiteconnect": "^5.0.0",
     "node-fetch": "^2.7.0"
   }
 }

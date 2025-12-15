@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Indian Options (Paper + Live)</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        margin: 20px;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        max-width: 1400px;
+        font-size: 12px;
+      }
+      th,
+      td {
+        border: 1px solid #ccc;
+        padding: 6px 8px;
+        text-align: left;
+        vertical-align: top;
+      }
+      th {
+        background: #f5f5f5;
+      }
+      .num {
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+      code {
+        background: #f6f8fa;
+        padding: 2px 4px;
+        border-radius: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <h2>Indian Options (Paper + Live)</h2>
+
+    <p style="font-size: 12px;">
+      This page shows per-instrument paper + live state. Zerodha ticks can be
+      pushed to <code>POST /zerodha/tick</code> with
+      <code>{"token":123,"ltp":12.34}</code>.
+    </p>
+
+    <p style="font-size: 12px;">
+      Graph: <a href="/optionsgraph.html">/optionsgraph.html</a>
+    </p>
+
+    <div style="margin: 10px 0; font-size: 12px;">
+      <button id="refreshBtn">Refresh</button>
+      <span id="status"></span>
+    </div>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Graph</th>
+          <th>TradingView</th>
+          <th>Zerodha</th>
+          <th>Token</th>
+          <th class="num">LTP</th>
+          <th>Paper State</th>
+          <th>Paper Position</th>
+          <th>Paper Triggers/Stops</th>
+          <th class="num">Paper Cum</th>
+          <th class="num">Paper Real</th>
+          <th class="num">Paper Unrl</th>
+          <th>Live State</th>
+          <th>Live Position</th>
+          <th class="num">Live Cum</th>
+          <th class="num">Live Real</th>
+          <th class="num">Live Unrl</th>
+          <th>Live Last Close</th>
+          <th>Lock</th>
+          <th class="num">Trades</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+
+    <h3 style="margin-top: 24px;">Recent Incoming Signals (Options)</h3>
+    <p style="font-size: 12px; color: #666;">
+      Filtered from <code>/recent-signals</code> where Routed To = OPTIONS.
+    </p>
+    <table>
+      <thead>
+        <tr>
+          <th>Time (IST)</th>
+          <th>Action</th>
+          <th>StopPx</th>
+          <th>Raw Symbol</th>
+          <th>Mapped Symbol</th>
+          <th>Note</th>
+          <th>Message</th>
+        </tr>
+      </thead>
+      <tbody id="signalsRows">
+        <tr>
+          <td colspan="7">No signals yet</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <script>
+      const statusEl = document.getElementById('status');
+      const rowsEl = document.getElementById('rows');
+      const refreshBtn = document.getElementById('refreshBtn');
+      const signalsRowsEl = document.getElementById('signalsRows');
+
+      function fmtNum(value) {
+        if (value == null) return '';
+        const n = Number(value);
+        if (!Number.isFinite(n)) return '';
+        return n.toFixed(2);
+      }
+
+      function fmtPos(p) {
+        if (!p || !p.isOpen) return 'No position';
+        const side = p.side ? String(p.side) : 'BUY';
+        const entry = p.entryPrice != null ? fmtNum(p.entryPrice) : '';
+        return `${side} @ ${entry}`;
+      }
+
+      function fmtTriggers(t) {
+        if (!t) return '';
+        const obj = {
+          savedBUYLTP: t.savedBUYLTP,
+          buyEntryTrigger: t.buyEntryTrigger,
+          buyStop: t.buyStop,
+          windowStartTs: t.windowStartTs,
+          windowDurationMs: t.windowDurationMs,
+          waitSourceState: t.waitSourceState,
+        };
+        return `<details><summary>view</summary><pre style="margin:6px 0; white-space:pre-wrap;">${JSON.stringify(
+          obj,
+          null,
+          2,
+        )}</pre></details>`;
+      }
+
+      function fmtLiveLastClose(live) {
+        const trades = live && Array.isArray(live.recentTrades) ? live.recentTrades : [];
+        const lastClose = [...trades].reverse().find((t) => t && t.action === 'CLOSE');
+        if (!lastClose) return '';
+        const exit = lastClose.exitPrice != null ? fmtNum(lastClose.exitPrice) : '';
+        const pnl = lastClose.tradePnl != null ? fmtNum(lastClose.tradePnl) : '';
+        const ts = (lastClose.tsIst || '').replace('T', ' ').slice(0, 16);
+        return `${ts} exit=${exit} pnl=${pnl}`;
+      }
+
+      async function loadSignals() {
+        try {
+          const res = await fetch('/recent-signals');
+          const data = await res.json();
+          const rows = Array.isArray(data.rows) ? data.rows : [];
+          const optRows = rows.filter((r) => r && r.routedTo === 'OPTIONS');
+
+          signalsRowsEl.innerHTML = '';
+          if (!optRows.length) {
+            const tr = document.createElement('tr');
+            const td = document.createElement('td');
+            td.colSpan = 7;
+            td.textContent = 'No signals yet';
+            tr.appendChild(td);
+            signalsRowsEl.appendChild(tr);
+            return;
+          }
+
+          optRows.slice(-50).forEach((r) => {
+            const tr = document.createElement('tr');
+            const cols = [
+              (r.tsIst || '').replace('T', ' ').slice(0, 16),
+              r.parsedAction || '',
+              typeof r.stopPx === 'number' ? r.stopPx.toFixed(2) : '',
+              r.rawSymbol || '',
+              r.symbol || '',
+              (r.note || '').slice(0, 80),
+              (r.rawMessage || '').slice(0, 120),
+            ];
+            cols.forEach((v, idx) => {
+              const td = document.createElement('td');
+              td.textContent = v;
+              if (idx >= 5) td.style.textAlign = 'left';
+              tr.appendChild(td);
+            });
+            signalsRowsEl.appendChild(tr);
+          });
+        } catch (e) {
+          // don't fail the whole page
+        }
+      }
+
+      async function load() {
+        statusEl.textContent = 'Loading...';
+        rowsEl.innerHTML = '';
+
+        try {
+          const [instRes, stateRes] = await Promise.all([
+            fetch('/options/instruments'),
+            fetch('/options/state'),
+          ]);
+          const instData = await instRes.json();
+          const stateData = await stateRes.json();
+          const instruments = instData.instruments || [];
+          const rows = stateData.rows || [];
+
+          const byTv = new Map(instruments.map((i) => [i.tradingview, i]));
+          const today = new Date();
+          const yyyy = today.getFullYear();
+          const mm = String(today.getMonth() + 1).padStart(2, '0');
+          const dd = String(today.getDate()).padStart(2, '0');
+          const todayKey = `${yyyy}-${mm}-${dd}`;
+
+          for (const r of rows) {
+            const meta = byTv.get(r.tradingview);
+            const tr = document.createElement('tr');
+            const graphHref = `/optionsgraph.html?symbol=${encodeURIComponent(
+              r.tradingview || '',
+            )}&date=${encodeURIComponent(todayKey)}`;
+            tr.innerHTML = `
+              <td><a href="${graphHref}">graph</a></td>
+              <td>${r.tradingview || ''}</td>
+              <td>${meta ? meta.zerodha : ''}</td>
+              <td class="num">${meta ? meta.token : ''}</td>
+              <td class="num">${fmtNum(r.lastPrice)}</td>
+              <td>${r.paper?.state || ''}</td>
+              <td>${fmtPos(r.paper?.position)}</td>
+              <td>${fmtTriggers(r.paper?.triggers)}</td>
+              <td class="num">${fmtNum(r.paper?.cumPnl)}</td>
+              <td class="num">${fmtNum(r.paper?.realizedCumPnl)}</td>
+              <td class="num">${fmtNum(r.paper?.unrealizedPnl)}</td>
+              <td>${r.live?.state || ''}</td>
+              <td>${fmtPos(r.live?.position)}</td>
+              <td class="num">${fmtNum(r.live?.cumPnl)}</td>
+              <td class="num">${fmtNum(r.live?.realizedCumPnl)}</td>
+              <td class="num">${fmtNum(r.live?.unrealizedPnl)}</td>
+              <td>${fmtLiveLastClose(r.live)}</td>
+              <td>${r.live?.lockUntilTs ? new Date(r.live.lockUntilTs).toISOString() : ''}</td>
+              <td class="num">${r.paper?.tradesCount ?? ''}</td>
+            `;
+            rowsEl.appendChild(tr);
+          }
+
+          statusEl.textContent = `Loaded ${rows.length} instruments.`;
+        } catch (e) {
+          statusEl.textContent = `Error: ${String(e)}`;
+        }
+
+        loadSignals();
+      }
+
+      refreshBtn.addEventListener('click', load);
+      load();
+      setInterval(load, 5000);
+    </script>
+  </body>
+</html>
