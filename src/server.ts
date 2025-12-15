@@ -32,6 +32,8 @@ app.use(
   }),
 );
 app.use(express.json());
+// TradingView sometimes sends `text/plain` bodies; accept those too.
+app.use(express.text({ type: 'text/plain' }));
 app.use(express.static('public'));
 
 // --- Recent incoming signals (for UI) ---
@@ -303,6 +305,10 @@ function logPnlSnapshot(snapshot: PnlSnapshot): void {
   // even if multiple trades happen in the same minute.
   if (snapshot.kind === 'TRADE_CLOSE') {
     writePnlCsvRow(snapshot);
+    // Also update the per-minute snapshot, but WITHOUT embedding trade fields,
+    // otherwise the minute flush will duplicate the trade row.
+    recordPnlMinute({ ...snapshot, trade: undefined });
+    return;
   }
   recordPnlMinute(snapshot);
 }
@@ -365,13 +371,7 @@ function recordPnlMinute(snapshot: PnlSnapshot): void {
 
   if (minuteKey === lastPnlMinuteKey) {
     // Same minute → overwrite in-memory snapshot; no immediate write.
-    // Important: don't lose a TRADE_CLOSE marker for the minute just because
-    // a later "MINUTE" heartbeat snapshot arrives.
-    if (lastPnlMinuteSnapshot?.trade && !snapshot.trade) {
-      lastPnlMinuteSnapshot = { ...snapshot, trade: lastPnlMinuteSnapshot.trade };
-    } else {
-      lastPnlMinuteSnapshot = snapshot;
-    }
+    lastPnlMinuteSnapshot = snapshot;
     return;
   }
 
@@ -860,7 +860,10 @@ app.post('/feed-mode', (req, res) => {
 //  { "message": "Accepted Entry + priorRisePct= 0.00 | stopPx=100 | sym=BTCUSD" }
 //  { "message": "Accepted Exit+ priorRisePct= 0.00 | stopPx=100 | sym=BTCUSD" }
 app.post('/webhook', (req, res) => {
-  const { message } = req.body as { message?: string };
+  const message =
+    typeof req.body === 'string'
+      ? req.body
+      : (req.body as { message?: unknown } | null | undefined)?.message;
 
   if (typeof message !== 'string') {
     return res.status(400).json({ error: 'message must be a string' });

@@ -246,7 +246,15 @@
               stacked: false,
               scales: {
                 x: {
-                  ticks: { maxRotation: 90, minRotation: 45 },
+                  ticks: {
+                    maxRotation: 0,
+                    minRotation: 0,
+                    callback: function (value) {
+                      const label = this.getLabelForValue(value);
+                      const parts = String(label).split(' ');
+                      return parts.length === 2 ? parts[1] : label;
+                    },
+                  },
                 },
                 y: {
                   title: {
@@ -261,18 +269,31 @@
                     afterBody: (ctx) => {
                       const index = ctx[0].dataIndex;
                       const row = currentChartRows[index];
-                      if (!row || !row.tradeSide) return '';
+                      if (!row) return '';
+                      // Trades are stored as separate rows in the CSV (can be multiple per minute),
+                      // so look them up by minute label instead of relying on the chart row.
+                      const timeKey = row.timeIst;
+                      const tradeRows = currentRows.filter(
+                        (r) => r.timeIst === timeKey && r.tradeSide,
+                      );
+                      if (!tradeRows.length) return '';
+
                       const parts = [];
-                      parts.push(`Trade: ${row.tradeSide}`);
-                      if (row.tradeEntry != null && row.tradeExit != null) {
-                        parts.push(
-                          `Entry: ${row.tradeEntry.toFixed(
-                            2,
-                          )}, Exit: ${row.tradeExit.toFixed(2)}`,
-                        );
+                      for (const tr of tradeRows.slice(0, 3)) {
+                        parts.push(`Trade: ${tr.tradeSide}`);
+                        if (tr.tradeEntry != null && tr.tradeExit != null) {
+                          parts.push(
+                            `Entry: ${tr.tradeEntry.toFixed(
+                              2,
+                            )}, Exit: ${tr.tradeExit.toFixed(2)}`,
+                          );
+                        }
+                        if (tr.tradePnl != null) {
+                          parts.push(`Trade PnL: ${tr.tradePnl.toFixed(2)}`);
+                        }
                       }
-                      if (row.tradePnl != null) {
-                        parts.push(`Trade PnL: ${row.tradePnl.toFixed(2)}`);
+                      if (tradeRows.length > 3) {
+                        parts.push(`(+${tradeRows.length - 3} more trades)`);
                       }
                       return parts;
                     },
@@ -319,7 +340,15 @@
               stacked: false,
               scales: {
                 x: {
-                  ticks: { maxRotation: 90, minRotation: 45 },
+                  ticks: {
+                    maxRotation: 0,
+                    minRotation: 0,
+                    callback: function (value) {
+                      const label = this.getLabelForValue(value);
+                      const parts = String(label).split(' ');
+                      return parts.length === 2 ? parts[1] : label;
+                    },
+                  },
                 },
                 y: {
                   title: {
@@ -334,18 +363,29 @@
                     afterBody: (ctx) => {
                       const index = ctx[0].dataIndex;
                       const row = currentChartRows[index];
-                      if (!row || !row.tradeSide) return '';
+                      if (!row) return '';
+                      const timeKey = row.timeIst;
+                      const tradeRows = currentRows.filter(
+                        (r) => r.timeIst === timeKey && r.tradeSide,
+                      );
+                      if (!tradeRows.length) return '';
+
                       const parts = [];
-                      parts.push(`Trade: ${row.tradeSide}`);
-                      if (row.tradeEntry != null && row.tradeExit != null) {
-                        parts.push(
-                          `Entry: ${row.tradeEntry.toFixed(
-                            2,
-                          )}, Exit: ${row.tradeExit.toFixed(2)}`,
-                        );
+                      for (const tr of tradeRows.slice(0, 3)) {
+                        parts.push(`Trade: ${tr.tradeSide}`);
+                        if (tr.tradeEntry != null && tr.tradeExit != null) {
+                          parts.push(
+                            `Entry: ${tr.tradeEntry.toFixed(
+                              2,
+                            )}, Exit: ${tr.tradeExit.toFixed(2)}`,
+                          );
+                        }
+                        if (tr.tradePnl != null) {
+                          parts.push(`Trade PnL: ${tr.tradePnl.toFixed(2)}`);
+                        }
                       }
-                      if (row.tradePnl != null) {
-                        parts.push(`Trade PnL: ${row.tradePnl.toFixed(2)}`);
+                      if (tradeRows.length > 3) {
+                        parts.push(`(+${tradeRows.length - 3} more trades)`);
                       }
                       return parts;
                     },
