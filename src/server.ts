@@ -128,7 +128,7 @@ async function sendLiveWebhookMessage(
   const message =
     kind === 'ENTRY'
       ? `Accepted Entry + priorRisePct= 0.00 | stopPx=${refPrice} | sym=${symbol}`
-      : `Accepted Exit+ priorRisePct= 0.00 | stopPx=${refPrice} | sym=${symbol}`;
+      : `Accepted Exit + priorRisePct= 0.00 | stopPx=${refPrice} | sym=${symbol}`;
 
   try {
     logState('Sending live webhook', { kind, symbol, refPrice, message });
