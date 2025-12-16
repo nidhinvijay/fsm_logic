@@ -1547,6 +1547,30 @@ app.get('/options/pnl-history', (req, res) => {
   return res.json({ symbol, date, rows });
 });
 
+// --- Global error handler (keeps body-parser JSON errors from spamming PM2 logs) ---
+app.use(((err, req, res, next) => {
+  // Express/Body-parser invalid JSON typically comes through as SyntaxError with type 'entity.parse.failed'
+  const isBadJson =
+    err &&
+    (err.type === 'entity.parse.failed' ||
+      (err instanceof SyntaxError && typeof err.message === 'string' && err.message.includes('JSON')));
+
+  if (!isBadJson) return next(err);
+
+  // Best-effort visibility: log what endpoint/content-type caused it.
+  logState('Invalid JSON body rejected', {
+    method: req.method,
+    path: req.path,
+    contentType: req.headers['content-type'] || null,
+    ip:
+      (req.headers['x-forwarded-for'] as string | undefined) ||
+      req.socket.remoteAddress ||
+      null,
+  });
+
+  return res.status(400).json({ error: 'invalid_json_body' });
+}) as express.ErrorRequestHandler);
+
 // Start server
 const PORT = 3000;
 app.listen(PORT, () => {
