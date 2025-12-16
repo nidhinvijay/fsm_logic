@@ -392,7 +392,16 @@ export class OptionsRuntimeManager {
         action === 'OPEN_POSITION' &&
         runtime.paperCtx.position.entryPrice != null
       ) {
-        openLive(runtime, runtime.paperCtx.position.entryPrice, nowTs);
+        logState('Options LIVE opening (from paper entry edge)', {
+          symbolId,
+          paperEntryPrice: runtime.paperCtx.position.entryPrice,
+          liveEntryPrice: ltp,
+          paperCumPnlTotal: paperPnl.total,
+          nowTs,
+        });
+        // Live entry should reflect the price at the moment we actually go live,
+        // not the paper entry price (paper may have entered earlier).
+        openLive(runtime, ltp, nowTs);
       }
     } else if (paperIsOpenNow) {
       // Paper already open; live might be IDLE (e.g. lock expired) -> try open
@@ -405,7 +414,15 @@ export class OptionsRuntimeManager {
         action === 'OPEN_POSITION' &&
         runtime.paperCtx.position.entryPrice != null
       ) {
-        openLive(runtime, runtime.paperCtx.position.entryPrice, nowTs);
+        logState('Options LIVE opening (from paper already-open)', {
+          symbolId,
+          paperEntryPrice: runtime.paperCtx.position.entryPrice,
+          liveEntryPrice: ltp,
+          paperCumPnlTotal: paperPnl.total,
+          nowTs,
+        });
+        // Live entry should reflect the price at the moment we actually go live.
+        openLive(runtime, ltp, nowTs);
       }
     }
 
