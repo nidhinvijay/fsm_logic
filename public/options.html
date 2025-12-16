@@ -109,6 +109,7 @@
       const rowsEl = document.getElementById('rows');
       const refreshBtn = document.getElementById('refreshBtn');
       const signalsRowsEl = document.getElementById('signalsRows');
+      const rowByTradingview = new Map();
 
       function fmtNum(value) {
         if (value == null) return '';
@@ -149,6 +150,37 @@
         const pnl = lastClose.tradePnl != null ? fmtNum(lastClose.tradePnl) : '';
         const ts = (lastClose.tsIst || '').replace('T', ' ').slice(0, 16);
         return `${ts} exit=${exit} pnl=${pnl}`;
+      }
+
+      function createRowCells() {
+        const tr = document.createElement('tr');
+        const cells = [];
+        for (let i = 0; i < 19; i++) {
+          const td = document.createElement('td');
+          tr.appendChild(td);
+          cells.push(td);
+        }
+
+        // numeric alignment columns
+        [3, 4, 8, 9, 10, 13, 14, 15, 18].forEach((idx) => {
+          cells[idx].className = 'num';
+        });
+
+        // graph link
+        const a = document.createElement('a');
+        a.textContent = 'graph';
+        cells[0].appendChild(a);
+
+        return { tr, cells, graphLink: a };
+      }
+
+      function getOrCreateRow(tradingview) {
+        const existing = rowByTradingview.get(tradingview);
+        if (existing) return existing;
+        const created = createRowCells();
+        rowByTradingview.set(tradingview, created);
+        rowsEl.appendChild(created.tr);
+        return created;
       }
 
       async function loadSignals() {
@@ -194,8 +226,7 @@
       }
 
       async function load() {
-        statusEl.textContent = 'Loading...';
-        rowsEl.innerHTML = '';
+        statusEl.textContent = 'Refreshing...';
 
         try {
           const [instRes, stateRes] = await Promise.all([
@@ -216,35 +247,43 @@
 
           for (const r of rows) {
             const meta = byTv.get(r.tradingview);
-            const tr = document.createElement('tr');
+            const tradingview = r.tradingview || '';
+            if (!tradingview) continue;
+
+            const row = getOrCreateRow(tradingview);
             const graphHref = `/optionsgraph.html?symbol=${encodeURIComponent(
-              r.tradingview || '',
+              tradingview,
             )}&date=${encodeURIComponent(todayKey)}`;
-            tr.innerHTML = `
-              <td><a href="${graphHref}">graph</a></td>
-              <td>${r.tradingview || ''}</td>
-              <td>${meta ? meta.zerodha : ''}</td>
-              <td class="num">${meta ? meta.token : ''}</td>
-              <td class="num">${fmtNum(r.lastPrice)}</td>
-              <td>${r.paper?.state || ''}</td>
-              <td>${fmtPos(r.paper?.position)}</td>
-              <td>${fmtTriggers(r.paper?.triggers)}</td>
-              <td class="num">${fmtNum(r.paper?.cumPnl)}</td>
-              <td class="num">${fmtNum(r.paper?.realizedCumPnl)}</td>
-              <td class="num">${fmtNum(r.paper?.unrealizedPnl)}</td>
-              <td>${r.live?.state || ''}</td>
-              <td>${fmtPos(r.live?.position)}</td>
-              <td class="num">${fmtNum(r.live?.cumPnl)}</td>
-              <td class="num">${fmtNum(r.live?.realizedCumPnl)}</td>
-              <td class="num">${fmtNum(r.live?.unrealizedPnl)}</td>
-              <td>${fmtLiveLastClose(r.live)}</td>
-              <td>${r.live?.lockUntilTs ? new Date(r.live.lockUntilTs).toISOString() : ''}</td>
-              <td class="num">${r.paper?.tradesCount ?? ''}</td>
-            `;
-            rowsEl.appendChild(tr);
+
+            row.graphLink.href = graphHref;
+            row.cells[1].textContent = tradingview;
+            row.cells[2].textContent = meta ? meta.zerodha : '';
+            row.cells[3].textContent = meta ? String(meta.token ?? '') : '';
+            row.cells[4].textContent = fmtNum(r.lastPrice);
+            row.cells[5].textContent = r.paper?.state || '';
+            row.cells[6].textContent = fmtPos(r.paper?.position);
+            row.cells[7].innerHTML = fmtTriggers(r.paper?.triggers);
+            row.cells[8].textContent = fmtNum(r.paper?.cumPnl);
+            row.cells[9].textContent = fmtNum(r.paper?.realizedCumPnl);
+            row.cells[10].textContent = fmtNum(r.paper?.unrealizedPnl);
+            row.cells[11].textContent = r.live?.state || '';
+            row.cells[12].textContent = fmtPos(r.live?.position);
+            row.cells[13].textContent = fmtNum(r.live?.cumPnl);
+            row.cells[14].textContent = fmtNum(r.live?.realizedCumPnl);
+            row.cells[15].textContent = fmtNum(r.live?.unrealizedPnl);
+            row.cells[16].textContent = fmtLiveLastClose(r.live);
+            row.cells[17].textContent = r.live?.lockUntilTs
+              ? new Date(r.live.lockUntilTs).toISOString()
+              : '';
+            row.cells[18].textContent =
+              r.paper?.tradesCount != null ? String(r.paper.tradesCount) : '';
           }
 
-          statusEl.textContent = `Loaded ${rows.length} instruments.`;
+          const now = new Date();
+          const hh = String(now.getHours()).padStart(2, '0');
+          const min = String(now.getMinutes()).padStart(2, '0');
+          const ss = String(now.getSeconds()).padStart(2, '0');
+          statusEl.textContent = `Loaded ${rows.length} instruments @ ${hh}:${min}:${ss}.`;
         } catch (e) {
           statusEl.textContent = `Error: ${String(e)}`;
         }
