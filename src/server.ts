@@ -40,9 +40,10 @@ app.use(
     credentials: true,
   }),
 );
+// Webhooks can arrive as `text/plain`, `application/json`, or sometimes without a reliable content-type.
+// Parse `/webhook` as text first so we can handle all of those uniformly.
+app.use('/webhook', express.text({ type: '*/*' }));
 app.use(express.json());
-// TradingView sometimes sends `text/plain` bodies; accept those too.
-app.use(express.text({ type: 'text/plain' }));
 app.use(express.static('public'));
 
 function upsertEnvLine(contents: string, key: string, value: string): string {
@@ -1019,10 +1020,39 @@ app.post('/feed-mode', (req, res) => {
 //  { "message": "Accepted Entry + priorRisePct= 0.00 | stopPx=100 | sym=BTCUSD" }
 //  { "message": "Accepted Exit+ priorRisePct= 0.00 | stopPx=100 | sym=BTCUSD" }
 app.post('/webhook', (req, res) => {
-  const message =
-    typeof req.body === 'string'
-      ? req.body
-      : (req.body as { message?: unknown } | null | undefined)?.message;
+  const body = req.body as unknown;
+  let message: string | undefined;
+
+  if (typeof body === 'string') {
+    const trimmed = body.trim();
+    // If the text body is actually JSON, extract a `message` field when present.
+    if (trimmed.startsWith('{') || trimmed.startsWith('[') || trimmed.startsWith('"')) {
+      try {
+        const parsed = JSON.parse(trimmed) as unknown;
+        if (typeof parsed === 'string') {
+          message = parsed;
+        } else if (parsed && typeof parsed === 'object') {
+          const parsedMessage = (parsed as { message?: unknown }).message;
+          if (typeof parsedMessage === 'string') message = parsedMessage;
+          else if (parsedMessage != null) message = JSON.stringify(parsedMessage);
+          else message = JSON.stringify(parsed);
+        } else if (parsed != null) {
+          message = String(parsed);
+        }
+      } catch {
+        // Not JSON; treat as plain text.
+        message = body;
+      }
+    } else {
+      message = body;
+    }
+  } else if (Buffer.isBuffer(body)) {
+    message = body.toString('utf8');
+  } else if (body && typeof body === 'object') {
+    const maybeMessage = (body as { message?: unknown }).message;
+    if (typeof maybeMessage === 'string') message = maybeMessage;
+    else if (maybeMessage != null) message = JSON.stringify(maybeMessage);
+  }
 
   if (typeof message !== 'string') {
     return res.status(400).json({ error: 'message must be a string' });
