@@ -30,6 +30,7 @@ import { OptionsRuntimeManager } from './optionsRuntime';
 import { loadOptionsHistory } from './optionsHistory';
 import { resolveZerodhaTick } from './zerodhaFeed';
 import { loadEnvOnce } from './loadEnv';
+import { captureWebhookSignal, captureZerodhaTick } from './captureLogger';
 
 loadEnvOnce();
 
@@ -747,9 +748,17 @@ async function pollDeltaOnce(): Promise<void> {
         action === 'OPEN_POSITION' &&
         paperLongCtx.position.entryPrice != null
       ) {
-        liveLongCtx.position.entryPrice = paperLongCtx.position.entryPrice;
+        // Live is starting AFTER the paper entry; use currentPrice as the live entry
+        // (using the paper entry here can create an instant, incorrect PnL jump).
+        logState('LIVE LONG opening from already-open paper position', {
+          paperEntryPrice: paperLongCtx.position.entryPrice,
+          liveEntryPrice: currentPrice,
+          cumPnlTotal,
+          nowTs: now,
+        });
+        liveLongCtx.position.entryPrice = currentPrice;
         // Open LONG → BUY
-        openLiveLong(paperLongCtx.position.entryPrice);
+        openLiveLong(currentPrice);
       }
     }
 
@@ -763,9 +772,16 @@ async function pollDeltaOnce(): Promise<void> {
         action === 'OPEN_POSITION' &&
         paperShortCtx.position.entryPrice != null
       ) {
-        liveShortCtx.position.entryPrice = paperShortCtx.position.entryPrice;
+        // Live is starting AFTER the paper entry; use currentPrice as the live entry.
+        logState('LIVE SHORT opening from already-open paper position', {
+          paperEntryPrice: paperShortCtx.position.entryPrice,
+          liveEntryPrice: currentPrice,
+          cumPnlTotal,
+          nowTs: now,
+        });
+        liveShortCtx.position.entryPrice = currentPrice;
         // Open SHORT → SELL
-        openLiveShort(paperShortCtx.position.entryPrice);
+        openLiveShort(currentPrice);
       }
     }
 
@@ -838,9 +854,15 @@ setInterval(() => {
       action === 'OPEN_POSITION' &&
       paperLongCtx.position.entryPrice != null
     ) {
-      liveLongCtx.position.entryPrice = paperLongCtx.position.entryPrice;
+      logState('LIVE LONG opening from already-open paper position (SIM)', {
+        paperEntryPrice: paperLongCtx.position.entryPrice,
+        liveEntryPrice: currentPrice,
+        cumPnlTotal,
+        nowTs: now,
+      });
+      liveLongCtx.position.entryPrice = currentPrice;
       // Open LONG → BUY
-      openLiveLong(paperLongCtx.position.entryPrice);
+      openLiveLong(currentPrice);
     }
   }
 
@@ -854,9 +876,15 @@ setInterval(() => {
       action === 'OPEN_POSITION' &&
       paperShortCtx.position.entryPrice != null
     ) {
-      liveShortCtx.position.entryPrice = paperShortCtx.position.entryPrice;
+      logState('LIVE SHORT opening from already-open paper position (SIM)', {
+        paperEntryPrice: paperShortCtx.position.entryPrice,
+        liveEntryPrice: currentPrice,
+        cumPnlTotal,
+        nowTs: now,
+      });
+      liveShortCtx.position.entryPrice = currentPrice;
       // Open SHORT → SELL
-      openLiveShort(paperShortCtx.position.entryPrice);
+      openLiveShort(currentPrice);
     }
   }
 
@@ -882,10 +910,12 @@ app.post('/zerodha/tick', (req, res) => {
 
   const resolved = resolveZerodhaTick({ token, ltp, ts });
   if (!resolved) {
+    captureZerodhaTick({ tsMs: ts, token, symbolId: null, ltp });
     return res.status(404).json({ error: 'unknown token', token });
   }
 
   optionsManager.handleTickBySymbol(resolved.symbolId, resolved.ltp, resolved.ts);
+  captureZerodhaTick({ tsMs: resolved.ts, token, symbolId: resolved.symbolId, ltp: resolved.ltp });
 
   return res.json({
     ok: true,
@@ -1022,6 +1052,14 @@ app.post('/feed-mode', (req, res) => {
 app.post('/webhook', (req, res) => {
   const body = req.body as unknown;
   let message: string | undefined;
+  const rawBodyText =
+    typeof body === 'string'
+      ? body
+      : Buffer.isBuffer(body)
+        ? body.toString('utf8')
+        : body && typeof body === 'object'
+          ? JSON.stringify(body)
+          : String(body ?? '');
 
   if (typeof body === 'string') {
     const trimmed = body.trim();
@@ -1075,6 +1113,17 @@ app.post('/webhook', (req, res) => {
     const instrument = getInstrumentByTradingViewSymbol(symbol);
     if (!instrument) {
       const nowIgnored = Date.now();
+      captureWebhookSignal({
+        tsMs: nowIgnored,
+        contentType: String(req.headers['content-type'] || ''),
+        rawBodyText,
+        message,
+        action: isEntry ? 'ENTRY' : isExit ? 'EXIT' : 'UNKNOWN',
+        rawSymbol,
+        mappedSymbol: symbol,
+        stopPx: typeof stopPx === 'number' ? stopPx : null,
+        routedTo: 'IGNORED',
+      });
       pushRecentSignal({
         tsUtc: new Date(nowIgnored).toISOString(),
         tsIst: toIstIso(nowIgnored),
@@ -1094,6 +1143,17 @@ app.post('/webhook', (req, res) => {
     const nowOpt = Date.now();
     const action = isEntry ? 'ENTRY' : isExit ? 'EXIT' : null;
     if (!action) {
+      captureWebhookSignal({
+        tsMs: nowOpt,
+        contentType: String(req.headers['content-type'] || ''),
+        rawBodyText,
+        message,
+        action: 'UNKNOWN',
+        rawSymbol,
+        mappedSymbol: instrument.tradingview,
+        stopPx: typeof stopPx === 'number' ? stopPx : null,
+        routedTo: 'OPTIONS',
+      });
       pushRecentSignal({
         tsUtc: new Date(nowOpt).toISOString(),
         tsIst: toIstIso(nowOpt),
@@ -1116,6 +1176,17 @@ app.post('/webhook', (req, res) => {
       nowOpt,
     );
 
+    captureWebhookSignal({
+      tsMs: nowOpt,
+      contentType: String(req.headers['content-type'] || ''),
+      rawBodyText,
+      message,
+      action,
+      rawSymbol,
+      mappedSymbol: instrument.tradingview,
+      stopPx: typeof stopPx === 'number' ? stopPx : null,
+      routedTo: 'OPTIONS',
+    });
     pushRecentSignal({
       tsUtc: new Date(nowOpt).toISOString(),
       tsIst: toIstIso(nowOpt),
@@ -1148,6 +1219,17 @@ app.post('/webhook', (req, res) => {
       ts: now,
     });
 
+    captureWebhookSignal({
+      tsMs: now,
+      contentType: String(req.headers['content-type'] || ''),
+      rawBodyText,
+      message,
+      action: 'ENTRY',
+      rawSymbol,
+      mappedSymbol: 'BTCUSD',
+      stopPx: typeof stopPx === 'number' ? stopPx : null,
+      routedTo: 'PAPER_LONG_BUY',
+    });
     pushRecentSignal({
       tsUtc: new Date(now).toISOString(),
       tsIst: toIstIso(now),
@@ -1177,6 +1259,17 @@ app.post('/webhook', (req, res) => {
       ts: now,
     });
 
+    captureWebhookSignal({
+      tsMs: now,
+      contentType: String(req.headers['content-type'] || ''),
+      rawBodyText,
+      message,
+      action: 'EXIT',
+      rawSymbol,
+      mappedSymbol: 'BTCUSD',
+      stopPx: typeof stopPx === 'number' ? stopPx : null,
+      routedTo: 'PAPER_SHORT_SELL',
+    });
     pushRecentSignal({
       tsUtc: new Date(now).toISOString(),
       tsIst: toIstIso(now),
@@ -1212,6 +1305,17 @@ app.post('/webhook', (req, res) => {
     note: 'No condition matched',
   });
 
+  captureWebhookSignal({
+    tsMs: now,
+    contentType: String(req.headers['content-type'] || ''),
+    rawBodyText,
+    message,
+    action: 'UNKNOWN',
+    rawSymbol,
+    mappedSymbol: 'BTCUSD',
+    stopPx: typeof stopPx === 'number' ? stopPx : null,
+    routedTo: null,
+  });
   return res.json({
     message: 'Webhook message received but no condition matched',
     state: getStateSnapshot(),

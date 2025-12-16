@@ -209,48 +209,115 @@
     </div>
 
     <div class="card">
-      <h2>Trades (Paper LONG + SHORT)</h2>
+      <h2>Paper Trades (LONG)</h2>
       <table>
         <thead>
           <tr>
             <th>#</th>
-            <th>Side</th>
+            <th>Open (IST)</th>
+            <th>Close (IST)</th>
             <th>Entry</th>
             <th>Exit</th>
             <th>PnL</th>
           </tr>
         </thead>
-        <tbody id="tradeRows">
+        <tbody id="paperLongTradeRows">
           <tr>
-            <td colspan="5">No trades yet</td>
+            <td colspan="6">No trades yet</td>
           </tr>
         </tbody>
       </table>
     </div>
 
     <div class="card">
-      <h2>Live Trade Events (BTCUSD)</h2>
+      <h2>Paper Trades (SHORT)</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Open (IST)</th>
+            <th>Close (IST)</th>
+            <th>Entry</th>
+            <th>Exit</th>
+            <th>PnL</th>
+          </tr>
+        </thead>
+        <tbody id="paperShortTradeRows">
+          <tr>
+            <td colspan="6">No trades yet</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>Live Trades (LONG)</h2>
       <p style="font-size: 12px; color: #666;">
-        Shows live OPEN/CLOSE events (what we sent to Bharath).
+        Shows completed live LONG trades (paired OPEN → CLOSE).
       </p>
       <table>
         <thead>
           <tr>
-            <th>Time (IST)</th>
-            <th>Side</th>
-            <th>Action</th>
+            <th>Open (IST)</th>
+            <th>Close (IST)</th>
             <th>Entry</th>
             <th>Exit</th>
             <th>Trade PnL</th>
             <th>Cum After</th>
           </tr>
         </thead>
-        <tbody id="liveTradeRows">
+        <tbody id="liveLongTradesRows">
           <tr>
-            <td colspan="7">No live trades yet</td>
+            <td colspan="6">No live trades yet</td>
           </tr>
         </tbody>
       </table>
+    </div>
+
+    <div class="card">
+      <h2>Live Trades (SHORT)</h2>
+      <p style="font-size: 12px; color: #666;">
+        Shows completed live SHORT trades (paired OPEN → CLOSE).
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>Open (IST)</th>
+            <th>Close (IST)</th>
+            <th>Entry</th>
+            <th>Exit</th>
+            <th>Trade PnL</th>
+            <th>Cum After</th>
+          </tr>
+        </thead>
+        <tbody id="liveShortTradesRows">
+          <tr>
+            <td colspan="6">No live trades yet</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <details style="margin-top: 10px;">
+        <summary style="cursor: pointer;">View raw live OPEN/CLOSE events</summary>
+        <table style="margin-top: 10px;">
+          <thead>
+            <tr>
+              <th>Time (IST)</th>
+              <th>Side</th>
+              <th>Action</th>
+              <th>Entry</th>
+              <th>Exit</th>
+              <th>Trade PnL</th>
+              <th>Cum After</th>
+            </tr>
+          </thead>
+          <tbody id="liveEventRows">
+            <tr>
+              <td colspan="7">No live events yet</td>
+            </tr>
+          </tbody>
+        </table>
+      </details>
     </div>
 
     <div class="card">
@@ -283,12 +350,110 @@
       <pre id="fsmLogs">-</pre>
     </div>
 
-    <div class="card">
-      <h2>Raw State JSON</h2>
-      <pre id="rawState">-</pre>
-    </div>
-
     <script>
+      function fmtIstFromMs(tsMs) {
+        if (typeof tsMs !== 'number' || !Number.isFinite(tsMs)) return '';
+        return new Date(tsMs + 5.5 * 60 * 60 * 1000).toISOString().slice(0, 16).replace('T', ' ');
+      }
+
+      function renderTradesIntoTable(tbody, trades) {
+        tbody.innerHTML = '';
+        if (!Array.isArray(trades) || trades.length === 0) {
+          const row = document.createElement('tr');
+          const cell = document.createElement('td');
+          cell.colSpan = 6;
+          cell.textContent = 'No trades yet';
+          row.appendChild(cell);
+          tbody.appendChild(row);
+          return;
+        }
+
+        trades.forEach((t, idx) => {
+          const row = document.createElement('tr');
+
+          const cIdx = document.createElement('td');
+          cIdx.textContent = String(idx + 1);
+          row.appendChild(cIdx);
+
+          const cOpen = document.createElement('td');
+          cOpen.textContent = fmtIstFromMs(t.openedAt ?? null);
+          row.appendChild(cOpen);
+
+          const cClose = document.createElement('td');
+          cClose.textContent = fmtIstFromMs(t.closedAt ?? null);
+          row.appendChild(cClose);
+
+          const cEntry = document.createElement('td');
+          cEntry.textContent =
+            typeof t.entryPrice === 'number'
+              ? t.entryPrice.toFixed(2)
+              : '-';
+          row.appendChild(cEntry);
+
+          const cExit = document.createElement('td');
+          cExit.textContent =
+            t.exitPrice != null ? t.exitPrice.toFixed(2) : '-';
+          row.appendChild(cExit);
+
+          const cPnl = document.createElement('td');
+          if (typeof t.pnl === 'number') {
+            cPnl.textContent = t.pnl.toFixed(2);
+            if (t.pnl > 0) cPnl.style.color = 'green';
+            else if (t.pnl < 0) cPnl.style.color = 'red';
+          } else {
+            cPnl.textContent = '-';
+          }
+          row.appendChild(cPnl);
+
+          tbody.appendChild(row);
+        });
+      }
+
+      function pairLiveEventsToTrades(liveEvents) {
+        const openBySide = { LONG: null, SHORT: null };
+        const trades = [];
+
+        const events = Array.isArray(liveEvents) ? liveEvents : [];
+        // events are recorded in-time; iterate in order to pair correctly
+        for (const e of events) {
+          if (!e || !e.side || !e.action) continue;
+          const side = String(e.side).toUpperCase();
+          const action = String(e.action).toUpperCase();
+          if (side !== 'LONG' && side !== 'SHORT') continue;
+
+          if (action === 'OPEN') {
+            openBySide[side] = e;
+          } else if (action === 'CLOSE') {
+            const open = openBySide[side];
+            if (open) {
+              trades.push({
+                side,
+                openTsIst: (open.tsIst || '').replace('T', ' ').slice(0, 16),
+                closeTsIst: (e.tsIst || '').replace('T', ' ').slice(0, 16),
+                entryPrice: open.entryPrice,
+                exitPrice: e.exitPrice,
+                tradePnl: e.tradePnl,
+                cumPnlAfter: e.cumPnlAfter,
+              });
+              openBySide[side] = null;
+            } else {
+              // unmatched close; still show as a row so it's visible
+              trades.push({
+                side,
+                openTsIst: '',
+                closeTsIst: (e.tsIst || '').replace('T', ' ').slice(0, 16),
+                entryPrice: e.entryPrice,
+                exitPrice: e.exitPrice,
+                tradePnl: e.tradePnl,
+                cumPnlAfter: e.cumPnlAfter,
+              });
+            }
+          }
+        }
+
+        return trades;
+      }
+
       async function fetchState() {
         const res = await fetch('/state');
         const data = await res.json();
@@ -310,6 +475,13 @@
         const tbody = document.getElementById('recentSignalsRows');
 
         tbody.innerHTML = '';
+        const btcRows = rows.filter((r) => {
+          if (!r) return false;
+          const sym = r.symbol || '';
+          const raw = r.rawSymbol || '';
+          return sym === 'BTCUSD' || raw === 'BTCUSD' || raw === 'BTCUSDT';
+        });
+        const showRows = btcRows.slice(-50); // keep table small
         if (!rows.length) {
           const tr = document.createElement('tr');
           const td = document.createElement('td');
@@ -319,9 +491,17 @@
           tbody.appendChild(tr);
           return;
         }
+        if (!showRows.length) {
+          const tr = document.createElement('tr');
+          const td = document.createElement('td');
+          td.colSpan = 7;
+          td.textContent = 'No BTCUSD signals yet';
+          tr.appendChild(td);
+          tbody.appendChild(tr);
+          return;
+        }
 
-        const lastRows = rows.slice(-50); // keep table small
-        lastRows.forEach((r) => {
+        showRows.forEach((r) => {
           const tr = document.createElement('tr');
           const cols = [
             (r.tsIst || '').replace('T', ' ').slice(0, 16),
@@ -483,83 +663,86 @@
         // Live SHORT
         renderLiveSide('Short', state.liveShort);
 
-        // Trades combined
         const longTrades = pLong.trades || [];
         const shortTrades = pShort.trades || [];
-        const allTrades = [...longTrades, ...shortTrades].sort((a, b) => {
+        // Paper trades split by side (sorted by close time)
+        const sortByClose = (a, b) => {
           const ta = a.closedAt ?? a.openedAt ?? 0;
           const tb = b.closedAt ?? b.openedAt ?? 0;
           return ta - tb;
-        });
-
-        const tbody = document.getElementById('tradeRows');
-        tbody.innerHTML = '';
-        if (allTrades.length === 0) {
-          const row = document.createElement('tr');
-          const cell = document.createElement('td');
-          cell.colSpan = 5;
-          cell.textContent = 'No trades yet';
-          row.appendChild(cell);
-          tbody.appendChild(row);
-        } else {
-          allTrades.forEach((t, idx) => {
-            const row = document.createElement('tr');
-
-            const cIdx = document.createElement('td');
-            cIdx.textContent = String(idx + 1);
-            row.appendChild(cIdx);
-
-            const cSide = document.createElement('td');
-            cSide.textContent = t.side;
-            row.appendChild(cSide);
-
-            const cEntry = document.createElement('td');
-            cEntry.textContent =
-              typeof t.entryPrice === 'number'
-                ? t.entryPrice.toFixed(2)
-                : '-';
-            row.appendChild(cEntry);
-
-            const cExit = document.createElement('td');
-            cExit.textContent =
-              t.exitPrice != null ? t.exitPrice.toFixed(2) : '-';
-            row.appendChild(cExit);
-
-            const cPnl = document.createElement('td');
-            if (typeof t.pnl === 'number') {
-              cPnl.textContent = t.pnl.toFixed(2);
-              if (t.pnl > 0) cPnl.style.color = 'green';
-              else if (t.pnl < 0) cPnl.style.color = 'red';
-            } else {
-              cPnl.textContent = '-';
-            }
-            row.appendChild(cPnl);
-
-            tbody.appendChild(row);
-          });
-        }
-
-        document.getElementById('rawState').textContent = JSON.stringify(
-          state,
-          null,
-          2,
+        };
+        renderTradesIntoTable(
+          document.getElementById('paperLongTradeRows'),
+          [...longTrades].sort(sortByClose),
+        );
+        renderTradesIntoTable(
+          document.getElementById('paperShortTradeRows'),
+          [...shortTrades].sort(sortByClose),
         );
 
-        // Live trade events
-        const liveTbody = document.getElementById('liveTradeRows');
+        // Live trades (paired from live events)
+        const liveLongTradesTbody = document.getElementById('liveLongTradesRows');
+        const liveShortTradesTbody = document.getElementById('liveShortTradesRows');
+        const liveEventsTbody = document.getElementById('liveEventRows');
         const liveRows = Array.isArray(state.liveTradeEvents)
           ? state.liveTradeEvents
           : [];
-        liveTbody.innerHTML = '';
+        liveLongTradesTbody.innerHTML = '';
+        liveShortTradesTbody.innerHTML = '';
+        liveEventsTbody.innerHTML = '';
+
+        const paired = pairLiveEventsToTrades(liveRows);
+        const longPaired = paired.filter((t) => t.side === 'LONG');
+        const shortPaired = paired.filter((t) => t.side === 'SHORT');
+
+        function renderLiveTradesTable(tbody, trades) {
+          tbody.innerHTML = '';
+          if (!trades.length) {
+            const row = document.createElement('tr');
+            const cell = document.createElement('td');
+            cell.colSpan = 6;
+            cell.textContent = 'No live trades yet';
+            row.appendChild(cell);
+            tbody.appendChild(row);
+            return;
+          }
+
+          trades
+            .slice(-30)
+            .reverse()
+            .forEach((r) => {
+              const row = document.createElement('tr');
+              const cols = [
+                r.openTsIst || '',
+                r.closeTsIst || '',
+                typeof r.entryPrice === 'number' ? r.entryPrice.toFixed(2) : '',
+                typeof r.exitPrice === 'number' ? r.exitPrice.toFixed(2) : '',
+                typeof r.tradePnl === 'number' ? r.tradePnl.toFixed(2) : '',
+                typeof r.cumPnlAfter === 'number' ? r.cumPnlAfter.toFixed(2) : '',
+              ];
+              cols.forEach((v, idx) => {
+                const td = document.createElement('td');
+                td.textContent = v;
+                if (idx < 2) td.style.textAlign = 'left';
+                row.appendChild(td);
+              });
+              tbody.appendChild(row);
+            });
+        }
+
+        renderLiveTradesTable(liveLongTradesTbody, longPaired);
+        renderLiveTradesTable(liveShortTradesTbody, shortPaired);
+
+        // Raw live events (for debugging)
         if (!liveRows.length) {
           const row = document.createElement('tr');
           const cell = document.createElement('td');
           cell.colSpan = 7;
-          cell.textContent = 'No live trades yet';
+          cell.textContent = 'No live events yet';
           row.appendChild(cell);
-          liveTbody.appendChild(row);
+          liveEventsTbody.appendChild(row);
         } else {
-          const lastRows = liveRows.slice(-30).reverse();
+          const lastRows = liveRows.slice(-40).reverse();
           lastRows.forEach((r) => {
             const row = document.createElement('tr');
             const cols = [
@@ -577,7 +760,7 @@
               if (idx === 0) td.style.textAlign = 'left';
               row.appendChild(td);
             });
-            liveTbody.appendChild(row);
+            liveEventsTbody.appendChild(row);
           });
         }
       }

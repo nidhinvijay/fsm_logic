@@ -257,3 +257,11 @@
 2025-12-10T18:45:40.668Z [debug] Window started {"symbolId":"BTCUSD","startTs":1765392340668,"durationMs":60000}
 2025-12-10T18:45:40.668Z [debug] Open LONG from BUYENTRY_WINDOW {"symbolId":"BTCUSD","from":"BUYENTRY_WINDOW","to":"BUYPROFIT_WINDOW","entryPrice":92635.28856,"trigger":92634.285982,"stop":92633.285982}
 2025-12-10T18:45:40.669Z [debug] Live cumPnl <= 0 but no open position; leaving live state unchanged {"symbolId":"BTCUSD-LONG","cumPnl":0,"nowTs":1765392340668}
+17/12/2025, 00:21:07 [debug] FSM created for symbol: BTCUSD {"state":"WAIT_FOR_SIGNAL"}
+17/12/2025, 00:21:07 [debug] FSM created for symbol: BTCUSD {"state":"WAIT_FOR_SIGNAL"}
+17/12/2025, 00:21:07 [debug] Live FSM created {"symbolId":"BTCUSD-LONG","state":"IDLE"}
+17/12/2025, 00:21:07 [debug] Live FSM created {"symbolId":"BTCUSD-SHORT","state":"IDLE"}
+17/12/2025, 00:23:05 [debug] FSM created for symbol: BTCUSD {"state":"WAIT_FOR_SIGNAL"}
+17/12/2025, 00:23:05 [debug] FSM created for symbol: BTCUSD {"state":"WAIT_FOR_SIGNAL"}
+17/12/2025, 00:23:05 [debug] Live FSM created {"symbolId":"BTCUSD-LONG","state":"IDLE"}
+17/12/2025, 00:23:05 [debug] Live FSM created {"symbolId":"BTCUSD-SHORT","state":"IDLE"}

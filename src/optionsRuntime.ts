@@ -40,6 +40,7 @@ export interface OptionsRuntimeSnapshot {
     unrealizedPnl: number;
     cumPnl: number;
     tradesCount: number;
+    recentTrades: FSMContext['trades'];
   };
 
   live: {
@@ -76,6 +77,7 @@ interface OptionsRuntime {
 
   pendingExit: boolean;
   pendingExitRequestedAt: number | null;
+  pendingReentryAfterExit: boolean;
 
   lastMinuteKey: string | null;
   lastMinuteSnapshot: {
@@ -135,9 +137,9 @@ function openLive(runtime: OptionsRuntime, entryPrice: number, nowTs: number) {
   if (runtime.liveTradeEvents.length > 50) runtime.liveTradeEvents.shift();
 }
 
-function closeLive(runtime: OptionsRuntime, exitPrice: number) {
-  const nowTs = Date.now();
+function closeLive(runtime: OptionsRuntime, exitPrice: number, nowTs: number) {
   const entry = runtime.liveEntryPrice;
+  const openedAt = runtime.liveCtx.position.openedAt ?? nowTs;
   let pnl: number | null = null;
   if (runtime.liveEntryPrice != null) {
     pnl = round2(exitPrice - runtime.liveEntryPrice);
@@ -157,6 +159,23 @@ function closeLive(runtime: OptionsRuntime, exitPrice: number) {
     cumPnlAfter: runtime.liveRealizedCumPnl,
   });
   if (runtime.liveTradeEvents.length > 50) runtime.liveTradeEvents.shift();
+
+  // Persist live trade close so UI can show full-day history even after restarts.
+  if (entry != null && pnl != null) {
+    writeOptionsCsvRow({
+      symbolId: runtime.instrument.tradingview,
+      tsMs: nowTs,
+      paper: getPaperPnl(runtime.paperCtx, runtime.lastPrice),
+      live: getLivePnl(runtime, runtime.lastPrice),
+      liveTrade: {
+        openedAt,
+        entryPrice: entry,
+        exitPrice,
+        pnl,
+        cumPnlAfter: runtime.liveRealizedCumPnl,
+      },
+    });
+  }
 }
 
 function closePaperAndWaitWindow(
@@ -188,6 +207,26 @@ function closePaperAndWaitWindow(
   });
 }
 
+function closePaperAndReenterNow(params: {
+  ctx: FSMContext;
+  symbolId: string;
+  currentPrice: number;
+  nowTs: number;
+}): void {
+  // Close the current paper position at currentPrice
+  closePosition(params.ctx, params.currentPrice, params.nowTs);
+
+  // Force a clean "signal-accepted" state and immediately generate a BUY signal
+  // using the same current tick price as the first post-signal tick.
+  params.ctx.state = FSMState.WAIT_FOR_SIGNAL;
+  params.ctx.windowStartTs = undefined;
+  params.ctx.windowDurationMs = undefined;
+  params.ctx.waitSourceState = undefined;
+
+  onSignal(params.ctx, { symbolId: params.symbolId, side: 'BUY', ts: params.nowTs });
+  onTick(params.ctx, { symbolId: params.symbolId, ltp: params.currentPrice, ts: params.nowTs });
+}
+
 function ensureLogsDir(): void {
   if (!fs.existsSync('logs')) fs.mkdirSync('logs', { recursive: true });
 }
@@ -209,11 +248,19 @@ function writeOptionsCsvRow(params: {
   tsMs: number;
   paper: ReturnType<typeof getPaperPnl>;
   live: ReturnType<typeof getLivePnl>;
-  trade?: {
+  paperTrade?: {
     side: 'BUY' | 'SELL';
+    openedAt: number;
     entryPrice: number;
     exitPrice: number;
     pnl: number;
+  };
+  liveTrade?: {
+    openedAt: number;
+    entryPrice: number;
+    exitPrice: number;
+    pnl: number;
+    cumPnlAfter: number;
   };
 }): void {
   ensureLogsDir();
@@ -223,15 +270,23 @@ function writeOptionsCsvRow(params: {
   const filePath = path.join('logs', `options-${safeSym}-${datePart}.csv`);
 
   const header =
-    'timeIst,paperCumPnl,paperRealized,paperUnrealized,liveCumPnl,liveRealized,liveUnrealized,tradeSide,tradeEntry,tradeExit,tradePnl\n';
+    'timeIst,paperCumPnl,paperRealized,paperUnrealized,liveCumPnl,liveRealized,liveUnrealized,tradeSide,tradeOpenedAtMs,tradeEntry,tradeExit,tradePnl,liveTradeOpenedAtMs,liveTradeEntry,liveTradeExit,liveTradePnl,liveTradeCumAfter\n';
 
   if (!fs.existsSync(filePath)) fs.writeFileSync(filePath, header, 'utf8');
 
-  const trade = params.trade;
-  const tradeSide = trade ? trade.side : '';
-  const tradeEntry = trade ? trade.entryPrice.toFixed(2) : '';
-  const tradeExit = trade ? trade.exitPrice.toFixed(2) : '';
-  const tradePnl = trade ? trade.pnl.toFixed(2) : '';
+  const paperTrade = params.paperTrade;
+  const tradeSide = paperTrade ? paperTrade.side : '';
+  const tradeOpenedAtMs = paperTrade ? String(paperTrade.openedAt) : '';
+  const tradeEntry = paperTrade ? paperTrade.entryPrice.toFixed(2) : '';
+  const tradeExit = paperTrade ? paperTrade.exitPrice.toFixed(2) : '';
+  const tradePnl = paperTrade ? paperTrade.pnl.toFixed(2) : '';
+
+  const liveTrade = params.liveTrade;
+  const liveTradeOpenedAtMs = liveTrade ? String(liveTrade.openedAt) : '';
+  const liveTradeEntry = liveTrade ? liveTrade.entryPrice.toFixed(2) : '';
+  const liveTradeExit = liveTrade ? liveTrade.exitPrice.toFixed(2) : '';
+  const liveTradePnl = liveTrade ? liveTrade.pnl.toFixed(2) : '';
+  const liveTradeCumAfter = liveTrade ? liveTrade.cumPnlAfter.toFixed(2) : '';
 
   const line =
     `${minuteKey},` +
@@ -241,7 +296,8 @@ function writeOptionsCsvRow(params: {
     `${params.live.total.toFixed(2)},` +
     `${params.live.realized.toFixed(2)},` +
     `${params.live.unrealized.toFixed(2)},` +
-    `${tradeSide},${tradeEntry},${tradeExit},${tradePnl}\n`;
+    `${tradeSide},${tradeOpenedAtMs},${tradeEntry},${tradeExit},${tradePnl},` +
+    `${liveTradeOpenedAtMs},${liveTradeEntry},${liveTradeExit},${liveTradePnl},${liveTradeCumAfter}\n`;
 
   fs.appendFileSync(filePath, line, 'utf8');
 }
@@ -295,6 +351,7 @@ export class OptionsRuntimeManager {
       liveTradeEvents: [],
       pendingExit: false,
       pendingExitRequestedAt: null,
+      pendingReentryAfterExit: false,
       lastMinuteKey: null,
       lastMinuteSnapshot: null,
     };
@@ -339,11 +396,19 @@ export class OptionsRuntimeManager {
       });
       runtime.pendingExit = true;
       runtime.pendingExitRequestedAt = nowTs;
+      runtime.pendingReentryAfterExit = true;
       return { kind: 'PENDING_EXIT_NO_PRICE' as const };
     }
 
-    closePaperAndWaitWindow(runtime.paperCtx, ltp, nowTs);
-    return { kind: 'CLOSED' as const, exitPrice: ltp };
+    // New rule: EXIT while open => close AND immediately generate a BUY signal
+    // based on the current LTP (no wait window).
+    closePaperAndReenterNow({
+      ctx: runtime.paperCtx,
+      symbolId,
+      currentPrice: ltp,
+      nowTs,
+    });
+    return { kind: 'CLOSED_AND_REENTERED' as const, exitPrice: ltp };
   }
 
   handleTickBySymbol(symbolId: string, ltp: number, nowTs: number) {
@@ -356,7 +421,17 @@ export class OptionsRuntimeManager {
     if (runtime.pendingExit && runtime.paperCtx.position.isOpen) {
       runtime.pendingExit = false;
       runtime.pendingExitRequestedAt = null;
-      closePaperAndWaitWindow(runtime.paperCtx, ltp, nowTs);
+      if (runtime.pendingReentryAfterExit) {
+        runtime.pendingReentryAfterExit = false;
+        closePaperAndReenterNow({
+          ctx: runtime.paperCtx,
+          symbolId,
+          currentPrice: ltp,
+          nowTs,
+        });
+      } else {
+        closePaperAndWaitWindow(runtime.paperCtx, ltp, nowTs);
+      }
     }
 
     const tick = { symbolId, ltp, ts: nowTs };
@@ -370,7 +445,7 @@ export class OptionsRuntimeManager {
       forceExitIfCumPnlNonPositive(runtime.liveCtx, paperPnl.total, nowTs) ===
       'CLOSE_POSITION'
     ) {
-      closeLive(runtime, ltp);
+      closeLive(runtime, ltp, nowTs);
     }
 
     // Detect paper open -> attempt live open (lock uses paper window end when available)
@@ -448,8 +523,9 @@ export class OptionsRuntimeManager {
             tsMs: tr.closedAt,
             paper: getPaperPnl(runtime.paperCtx, ltp),
             live: getLivePnl(runtime, ltp),
-            trade: {
+            paperTrade: {
               side: tr.side,
+              openedAt: tr.openedAt ?? tr.closedAt,
               entryPrice: tr.entryPrice,
               exitPrice: tr.exitPrice,
               pnl: tr.pnl,
@@ -485,6 +561,7 @@ export class OptionsRuntimeManager {
           unrealizedPnl: paper.unrealized,
           cumPnl: paper.total,
           tradesCount: rt.paperCtx.trades.length,
+          recentTrades: rt.paperCtx.trades.slice(-50),
         },
         live: {
           state: rt.liveCtx.state,
@@ -505,7 +582,7 @@ export class OptionsRuntimeManager {
         closePaperAndWaitWindow(rt.paperCtx, rt.lastPrice, nowTs);
       }
       if (rt.liveCtx.position.isOpen && rt.lastPrice != null) {
-        closeLive(rt, rt.lastPrice);
+        closeLive(rt, rt.lastPrice, nowTs);
         rt.liveCtx.position.isOpen = false;
       }
       // Flush last minute snapshot before reset (best effort).

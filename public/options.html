@@ -51,6 +51,10 @@
 
     <div style="margin: 10px 0; font-size: 12px;">
       <button id="refreshBtn">Refresh</button>
+      <label style="margin-left: 10px;">
+        Date:
+        <input id="dateInput" type="date" />
+      </label>
       <span id="status"></span>
     </div>
 
@@ -104,11 +108,19 @@
       </tbody>
     </table>
 
+    <h3 style="margin-top: 24px;">Trades (per instrument)</h3>
+    <p style="font-size: 12px; color: #666; margin-top: 6px;">
+      Paper trades are from the paper FSM. Live trades are paired from live OPEN/CLOSE events.
+    </p>
+    <div id="tradesBySymbol"></div>
+
     <script>
       const statusEl = document.getElementById('status');
       const rowsEl = document.getElementById('rows');
       const refreshBtn = document.getElementById('refreshBtn');
+      const dateInputEl = document.getElementById('dateInput');
       const signalsRowsEl = document.getElementById('signalsRows');
+      const tradesBySymbolEl = document.getElementById('tradesBySymbol');
       const rowByTradingview = new Map();
 
       function fmtNum(value) {
@@ -150,6 +162,206 @@
         const pnl = lastClose.tradePnl != null ? fmtNum(lastClose.tradePnl) : '';
         const ts = (lastClose.tsIst || '').replace('T', ' ').slice(0, 16);
         return `${ts} exit=${exit} pnl=${pnl}`;
+      }
+
+      function fmtIstFromMs(tsMs) {
+        if (typeof tsMs !== 'number' || !Number.isFinite(tsMs)) return '';
+        return new Date(tsMs + 5.5 * 60 * 60 * 1000)
+          .toISOString()
+          .slice(0, 16)
+          .replace('T', ' ');
+      }
+
+      function makeTable(params) {
+        const table = document.createElement('table');
+        const thead = document.createElement('thead');
+        const trh = document.createElement('tr');
+        params.headers.forEach((h) => {
+          const th = document.createElement('th');
+          th.textContent = h;
+          trh.appendChild(th);
+        });
+        thead.appendChild(trh);
+        table.appendChild(thead);
+
+        const tbody = document.createElement('tbody');
+        if (!params.rows.length) {
+          const tr = document.createElement('tr');
+          const td = document.createElement('td');
+          td.colSpan = params.headers.length;
+          td.textContent = params.emptyText || 'No rows';
+          tr.appendChild(td);
+          tbody.appendChild(tr);
+        } else {
+          params.rows.forEach((r) => {
+            const tr = document.createElement('tr');
+            r.forEach((cell, idx) => {
+              const td = document.createElement('td');
+              td.textContent = cell;
+              if (typeof params.numericFromIdx === 'number' && idx >= params.numericFromIdx) {
+                td.className = 'num';
+              }
+              tr.appendChild(td);
+            });
+            tbody.appendChild(tr);
+          });
+        }
+        table.appendChild(tbody);
+        return table;
+      }
+
+      function pairLiveEventsToTrades(symbolId, events) {
+        const trades = [];
+        let open = null;
+        for (const e of events || []) {
+          if (!e || !e.action) continue;
+          if (e.action === 'OPEN') open = e;
+          else if (e.action === 'CLOSE') {
+            trades.push({
+              symbolId,
+              openTsIst: open ? String(open.tsIst || '').replace('T', ' ').slice(0, 16) : '',
+              closeTsIst: String(e.tsIst || '').replace('T', ' ').slice(0, 16),
+              entryPrice: open ? open.entryPrice : e.entryPrice,
+              exitPrice: e.exitPrice,
+              tradePnl: e.tradePnl,
+              cumPnlAfter: e.cumPnlAfter,
+            });
+            open = null;
+          }
+        }
+        return trades;
+      }
+
+      function parseIst(timeIst) {
+        const [dPart, tPart] = String(timeIst || '').split(' ');
+        if (!dPart) return null;
+        const [yStr, mStr, dStr] = dPart.split('-');
+        const [hhStr, mmStr] = (tPart || '00:00').split(':');
+        const yy = parseInt(yStr, 10);
+        const mm = parseInt(mStr, 10) - 1;
+        const dd = parseInt(dStr, 10);
+        const hh = parseInt(hhStr, 10);
+        const mi = parseInt(mmStr, 10);
+        if (!Number.isFinite(yy) || !Number.isFinite(mm) || !Number.isFinite(dd)) return null;
+        return new Date(yy, mm, dd, hh, mi, 0);
+      }
+
+      function inMarketWindow(timeIst, dateKey) {
+        const dt = parseIst(timeIst);
+        if (!dt) return false;
+        const [yStr, mStr, dStr] = dateKey.split('-');
+        const yy = parseInt(yStr, 10);
+        const mm = parseInt(mStr, 10) - 1;
+        const dd = parseInt(dStr, 10);
+        const start = new Date(yy, mm, dd, 9, 15, 0);
+        const endExclusive = new Date(yy, mm, dd, 15, 30, 0);
+        return dt >= start && dt < endExclusive;
+      }
+
+      async function fetchHistoryRows(symbolId, dateKey) {
+        const url = `/options/pnl-history?symbol=${encodeURIComponent(symbolId)}&date=${encodeURIComponent(dateKey)}`;
+        const res = await fetch(url);
+        if (!res.ok) return [];
+        const data = await res.json();
+        return Array.isArray(data.rows) ? data.rows : [];
+      }
+
+      function renderTradesBySymbol(stateRows, dateKey) {
+        tradesBySymbolEl.innerHTML = '';
+        const rows = Array.isArray(stateRows) ? stateRows : [];
+
+        for (const r of rows) {
+          const symbolId = r && r.tradingview ? r.tradingview : '';
+          if (!symbolId) continue;
+
+          const details = document.createElement('details');
+          details.style.margin = '12px 0';
+
+          const summary = document.createElement('summary');
+          summary.style.cursor = 'pointer';
+          summary.textContent = `${symbolId} (paper=${fmtNum(r.paper?.cumPnl)} live=${fmtNum(r.live?.cumPnl)})`;
+          details.appendChild(summary);
+
+          const wrap = document.createElement('div');
+          wrap.style.marginTop = '10px';
+
+          const paperTitle = document.createElement('div');
+          paperTitle.style.fontWeight = 'bold';
+          paperTitle.style.margin = '8px 0 6px';
+          paperTitle.textContent = 'Paper trades';
+          wrap.appendChild(paperTitle);
+          const paperPlaceholder = document.createElement('div');
+          paperPlaceholder.textContent = 'Loading...';
+          wrap.appendChild(paperPlaceholder);
+
+          const liveTitle = document.createElement('div');
+          liveTitle.style.fontWeight = 'bold';
+          liveTitle.style.margin = '14px 0 6px';
+          liveTitle.textContent = 'Live trades';
+          wrap.appendChild(liveTitle);
+          const livePlaceholder = document.createElement('div');
+          livePlaceholder.textContent = 'Loading...';
+          wrap.appendChild(livePlaceholder);
+
+          details.appendChild(wrap);
+          tradesBySymbolEl.appendChild(details);
+
+          // Load full-day trades from CSV history (not limited to in-memory buffers).
+          (async () => {
+            try {
+              const historyRows = await fetchHistoryRows(symbolId, dateKey);
+              const within = historyRows.filter((hr) => inMarketWindow(hr.timeIst, dateKey));
+
+              const paperRows = within
+                .filter((hr) => hr && hr.tradePnl != null)
+                .map((hr) => [
+                  hr.tradeOpenedAtMs != null ? fmtIstFromMs(Number(hr.tradeOpenedAtMs)) : '',
+                  hr.tradeSide || '',
+                  fmtNum(hr.tradeEntry),
+                  fmtNum(hr.tradeExit),
+                  fmtNum(hr.tradePnl),
+                  hr.timeIst,
+                ]);
+
+              const liveRows = within
+                .filter((hr) => hr && hr.liveTradePnl != null)
+                .map((hr) => [
+                  hr.liveTradeOpenedAtMs != null ? fmtIstFromMs(Number(hr.liveTradeOpenedAtMs)) : '',
+                  fmtNum(hr.liveTradeEntry),
+                  fmtNum(hr.liveTradeExit),
+                  fmtNum(hr.liveTradePnl),
+                  fmtNum(hr.liveTradeCumAfter),
+                  hr.timeIst,
+                ]);
+
+              paperPlaceholder.replaceWith(
+                makeTable({
+                  headers: ['Open (IST)', 'Side', 'Entry', 'Exit', 'PnL', 'Close (IST)'],
+                  rows: paperRows.slice(-50).reverse(),
+                  emptyText: 'No paper trades yet',
+                  numericFromIdx: 2,
+                }),
+              );
+              livePlaceholder.replaceWith(
+                makeTable({
+                  headers: ['Open (IST)', 'Entry', 'Exit', 'PnL', 'Cum After', 'Close (IST)'],
+                  rows: liveRows.slice(-50).reverse(),
+                  emptyText: 'No live trades yet',
+                  numericFromIdx: 1,
+                }),
+              );
+            } catch (e) {
+              paperPlaceholder.textContent = 'Error loading trades';
+              livePlaceholder.textContent = 'Error loading trades';
+            }
+          })();
+        }
+
+        if (!tradesBySymbolEl.children.length) {
+          const div = document.createElement('div');
+          div.textContent = 'No instruments loaded.';
+          tradesBySymbolEl.appendChild(div);
+        }
       }
 
       function createRowCells() {
@@ -279,6 +491,8 @@
               r.paper?.tradesCount != null ? String(r.paper.tradesCount) : '';
           }
 
+          // Only render trades on explicit refresh / date change (not on 5s interval).
+
           const now = new Date();
           const hh = String(now.getHours()).padStart(2, '0');
           const min = String(now.getMinutes()).padStart(2, '0');
@@ -291,8 +505,37 @@
         loadSignals();
       }
 
-      refreshBtn.addEventListener('click', load);
+      async function loadTrades() {
+        try {
+          const dateKey = dateInputEl.value;
+          if (!dateKey) return;
+          const res = await fetch('/options/state');
+          const data = await res.json();
+          const rows = data.rows || [];
+          renderTradesBySymbol(rows, dateKey);
+        } catch (e) {
+          // ignore
+        }
+      }
+
+      refreshBtn.addEventListener('click', async () => {
+        await load();
+        await loadTrades();
+      });
+
+      dateInputEl.addEventListener('change', loadTrades);
+
+      // default to today
+      (function initDate() {
+        const today = new Date();
+        const yyyy = today.getFullYear();
+        const mm = String(today.getMonth() + 1).padStart(2, '0');
+        const dd = String(today.getDate()).padStart(2, '0');
+        dateInputEl.value = `${yyyy}-${mm}-${dd}`;
+      })();
+
       load();
+      loadTrades();
       setInterval(load, 5000);
     </script>
   </body>
