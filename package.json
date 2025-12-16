@@ -4,10 +4,16 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
+    "clean": "rm -rf dist",
+    "build": "tsc -p tsconfig.json",
     "start": "ts-node src/server.ts",
+    "start:prod": "node dist/src/server.js",
     "summary": "ts-node scripts/dailySummary.ts",
+    "summary:prod": "node dist/scripts/dailySummary.js",
     "zerodha:ticks": "ts-node scripts/zerodhaTicks.ts",
-    "zerodha:session": "ts-node scripts/zerodhaSession.ts"
+    "zerodha:ticks:prod": "node dist/scripts/zerodhaTicks.js",
+    "zerodha:session": "ts-node scripts/zerodhaSession.ts",
+    "zerodha:session:prod": "node dist/scripts/zerodhaSession.js"
   },
   "keywords": [],
   "author": "",
