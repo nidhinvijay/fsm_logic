@@ -10,7 +10,7 @@ import {
   onPaperEntryOpportunity,
   tryOpenLiveFromPaperPosition,
 } from './liveEngine';
-import { LiveContext } from './liveStates';
+import { LiveContext, LiveState } from './liveStates';
 import { round2, calcCumPnl } from './pnl';
 import { InstrumentInfo } from './instruments';
 import { logState } from './logger';
@@ -518,6 +518,15 @@ export class OptionsRuntimeManager {
           tr.pnl != null &&
           tr.closedAt != null
         ) {
+          // Practical behavior: when paper closes, also close live for this instrument.
+          // This keeps live aligned with paper exits (independent of the cumPnL gate).
+          if (runtime.liveCtx.position.isOpen) {
+            runtime.liveCtx.position.isOpen = false;
+            runtime.liveCtx.state = LiveState.IDLE;
+            runtime.liveCtx.lockUntilTs = undefined;
+            closeLive(runtime, tr.exitPrice, tr.closedAt);
+          }
+
           writeOptionsCsvRow({
             symbolId: runtime.instrument.tradingview,
             tsMs: tr.closedAt,

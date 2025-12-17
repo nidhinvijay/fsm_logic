@@ -181,6 +181,9 @@
             <span id="liveLongUnrealized">0.00</span>)
           </span>
         </p>
+        <p style="font-size: 12px; color: #666;">
+          <strong>Gate:</strong> <span id="liveLongGateInfo">-</span>
+        </p>
       </div>
 
       <div class="card">
@@ -205,11 +208,17 @@
             <span id="liveShortUnrealized">0.00</span>)
           </span>
         </p>
+        <p style="font-size: 12px; color: #666;">
+          <strong>Gate:</strong> <span id="liveShortGateInfo">-</span>
+        </p>
       </div>
     </div>
 
     <div class="card">
       <h2>Paper Trades (LONG)</h2>
+      <p style="font-size: 12px; color: #666; margin-top: -6px;">
+        Shows only closed trades.
+      </p>
       <table>
         <thead>
           <tr>
@@ -231,6 +240,9 @@
 
     <div class="card">
       <h2>Paper Trades (SHORT)</h2>
+      <p style="font-size: 12px; color: #666; margin-top: -6px;">
+        Shows only closed trades.
+      </p>
       <table>
         <thead>
           <tr>
@@ -253,7 +265,7 @@
     <div class="card">
       <h2>Live Trades (LONG)</h2>
       <p style="font-size: 12px; color: #666;">
-        Shows completed live LONG trades (paired OPEN → CLOSE).
+        Shows completed live LONG trades (paired OPEN → CLOSE). Open positions show as a single row.
       </p>
       <table>
         <thead>
@@ -277,7 +289,7 @@
     <div class="card">
       <h2>Live Trades (SHORT)</h2>
       <p style="font-size: 12px; color: #666;">
-        Shows completed live SHORT trades (paired OPEN → CLOSE).
+        Shows completed live SHORT trades (paired OPEN → CLOSE). Open positions show as a single row.
       </p>
       <table>
         <thead>
@@ -452,6 +464,40 @@
         }
 
         return trades;
+      }
+
+      function getOpenLiveEvent(liveEvents, side) {
+        const events = Array.isArray(liveEvents) ? liveEvents : [];
+        // iterate newest -> oldest to find the latest OPEN that has no later CLOSE
+        let seenCloseAfter = false;
+        for (let i = events.length - 1; i >= 0; i -= 1) {
+          const e = events[i];
+          if (!e || String(e.side).toUpperCase() !== side) continue;
+          const action = String(e.action || '').toUpperCase();
+          if (action === 'CLOSE') {
+            seenCloseAfter = true;
+          } else if (action === 'OPEN') {
+            // If we saw a CLOSE after this OPEN, then it's already closed.
+            // If not, treat as currently-open.
+            if (!seenCloseAfter) return e;
+            // reset after matching an OPEN for a previous cycle
+            seenCloseAfter = false;
+          }
+        }
+        return null;
+      }
+
+      function computeGateInfo(params) {
+        const { side, paperPosOpen, liveState, lockUntilTs, cumPnlTotal } = params;
+        if (!paperPosOpen) return `No paper ${side} position`;
+        if (typeof cumPnlTotal === 'number' && cumPnlTotal <= 0) {
+          return `Blocked: total paper cumPnL <= 0 (${cumPnlTotal.toFixed(2)})`;
+        }
+        if (liveState === 'LOCKED' && typeof lockUntilTs === 'number' && lockUntilTs > Date.now()) {
+          return `Locked until ${new Date(lockUntilTs).toLocaleTimeString()}`;
+        }
+        if (liveState === 'POSITION') return 'In position';
+        return 'Eligible (waiting for tick/hook)';
       }
 
       async function fetchState() {
@@ -663,6 +709,26 @@
         // Live SHORT
         renderLiveSide('Short', state.liveShort);
 
+        // Gate info
+        const cumTotal =
+          typeof state.cumPnlTotal === 'number' ? state.cumPnlTotal : 0;
+        const liveLong = state.liveLong || {};
+        const liveShort = state.liveShort || {};
+        document.getElementById('liveLongGateInfo').textContent = computeGateInfo({
+          side: 'LONG',
+          paperPosOpen: !!(pLong.position && pLong.position.isOpen),
+          liveState: liveLong.state,
+          lockUntilTs: liveLong.lockUntilTs,
+          cumPnlTotal: cumTotal,
+        });
+        document.getElementById('liveShortGateInfo').textContent = computeGateInfo({
+          side: 'SHORT',
+          paperPosOpen: !!(pShort.position && pShort.position.isOpen),
+          liveState: liveShort.state,
+          lockUntilTs: liveShort.lockUntilTs,
+          cumPnlTotal: cumTotal,
+        });
+
         const longTrades = pLong.trades || [];
         const shortTrades = pShort.trades || [];
         // Paper trades split by side (sorted by close time)
@@ -732,6 +798,44 @@
 
         renderLiveTradesTable(liveLongTradesTbody, longPaired);
         renderLiveTradesTable(liveShortTradesTbody, shortPaired);
+
+        // If there is a currently open live position, show it as a single row at the top.
+        const openLong = getOpenLiveEvent(liveRows, 'LONG');
+        const openShort = getOpenLiveEvent(liveRows, 'SHORT');
+
+        function prependOpenRow(tbody, openEvt) {
+          if (!openEvt) return;
+          // remove "No live trades yet" placeholder row if present
+          if (tbody.children.length === 1) {
+            const onlyRow = tbody.children[0];
+            if (onlyRow && onlyRow.textContent && onlyRow.textContent.includes('No live trades yet')) {
+              tbody.innerHTML = '';
+            }
+          }
+
+          const row = document.createElement('tr');
+          const cols = [
+            (openEvt.tsIst || '').replace('T', ' ').slice(0, 16),
+            '',
+            typeof openEvt.entryPrice === 'number' ? openEvt.entryPrice.toFixed(2) : '',
+            '',
+            '',
+            typeof openEvt.cumPnlAfter === 'number' ? openEvt.cumPnlAfter.toFixed(2) : '',
+          ];
+          cols.forEach((v, idx) => {
+            const td = document.createElement('td');
+            td.textContent = v;
+            if (idx < 2) td.style.textAlign = 'left';
+            row.appendChild(td);
+          });
+
+          // add a subtle hint that it's still open
+          row.style.opacity = '0.9';
+          tbody.prepend(row);
+        }
+
+        prependOpenRow(liveLongTradesTbody, openLong);
+        prependOpenRow(liveShortTradesTbody, openShort);
 
         // Raw live events (for debugging)
         if (!liveRows.length) {

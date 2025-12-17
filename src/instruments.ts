@@ -8,45 +8,45 @@ export interface InstrumentInfo {
 
 export const INSTRUMENTS_DATA: InstrumentInfo[] = [
   {
-    tradingview: 'NIFTY251216C26050',
+    tradingview: 'NIFTY251223C25900',
     exchange: 'NFO',
-    zerodha: 'NIFTY25D1626050CE',
-    token: 12345858,
+    zerodha: 'NIFTY25D2325900CE',
+    token: 14591490,
     lot: 75,
   },
   {
-    tradingview: 'NIFTY251216P26100',
+    tradingview: 'NIFTY251223P25950',
     exchange: 'NFO',
-    zerodha: 'NIFTY25D1626100PE',
-    token: 12346626,
+    zerodha: 'NIFTY25D2325950PE',
+    token: 14593026,
     lot: 75,
   },
   {
-    tradingview: 'BANKNIFTY251230C59400',
+    tradingview: 'BANKNIFTY251230C59100',
     exchange: 'NFO',
-    zerodha: 'BANKNIFTY25DEC59400CE',
-    token: 13173762,
+    zerodha: 'BANKNIFTY25DEC59100CE',
+    token: 13162498,
     lot: 35,
   },
   {
-    tradingview: 'BANKNIFTY251230P59500',
+    tradingview: 'BANKNIFTY251230P59200',
     exchange: 'NFO',
-    zerodha: 'BANKNIFTY25DEC59500PE',
-    token: 13177858,
+    zerodha: 'BANKNIFTY25DEC59200PE',
+    token: 13163778,
     lot: 35,
   },
   {
-    tradingview: 'BSX251218C85300',
+    tradingview: 'BSX251218C84700',
     exchange: 'BFO',
-    zerodha: 'SENSEX25D1885300CE',
-    token: 291220997,
+    zerodha: 'SENSEX25D1884700CE',
+    token: 293363461,
     lot: 20,
   },
   {
-    tradingview: 'BSX251218P85400',
+    tradingview: 'BSX251218P84800',
     exchange: 'BFO',
-    zerodha: 'SENSEX25D1885400PE',
-    token: 293306629,
+    zerodha: 'SENSEX25D1884800PE',
+    token: 293216261,
     lot: 20,
   },
 ];
@@ -67,4 +67,3 @@ export function getInstrumentByTradingViewSymbol(
 export function getInstrumentByToken(token: number): InstrumentInfo | undefined {
   return byToken.get(token);
 }
-

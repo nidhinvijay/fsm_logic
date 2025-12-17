@@ -22,6 +22,7 @@
         border-collapse: collapse;
         margin-top: 20px;
         font-size: 12px;
+        width: 100%;
       }
       th,
       td {
@@ -31,6 +32,19 @@
       }
       th {
         background: #f0f0f0;
+      }
+      .table-wrap {
+        max-width: 1400px;
+        overflow-x: auto;
+      }
+      th.sticky {
+        position: sticky;
+        top: 0;
+        z-index: 1;
+      }
+      td.left,
+      th.left {
+        text-align: left;
       }
     </style>
   </head>
@@ -59,20 +73,26 @@
     </div>
 
     <h3>Trades (rows where a trade was closed)</h3>
-    <table id="tradesTable">
-      <thead>
-        <tr>
-          <th>Time (IST)</th>
-          <th>Side</th>
-          <th>Entry</th>
-          <th>Exit</th>
-          <th>Trade PnL</th>
-          <th>Live Long Cum</th>
-          <th>Live Short Cum</th>
-        </tr>
-      </thead>
-      <tbody></tbody>
-    </table>
+    <div class="table-wrap">
+      <table id="tradesTable">
+        <thead>
+          <tr>
+            <th class="sticky left">Time (IST)</th>
+            <th class="sticky">Side</th>
+            <th class="sticky">Entry</th>
+            <th class="sticky">Exit</th>
+            <th class="sticky">Trade PnL</th>
+            <th class="sticky">Paper LONG</th>
+            <th class="sticky">Paper SHORT</th>
+            <th class="sticky">Paper TOTAL</th>
+            <th class="sticky">Live LONG</th>
+            <th class="sticky">Live SHORT</th>
+            <th class="sticky">Live TOTAL</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
 
     <script>
       const dateInput = document.getElementById('dateInput');
@@ -92,6 +112,12 @@
       let shortChart;
       let currentRows = [];
       let currentChartRows = [];
+
+      function fmtNum(v) {
+        const n = Number(v);
+        if (!Number.isFinite(n)) return '';
+        return n.toFixed(2);
+      }
 
       function addDays(dateStr, days) {
         const [yStr, mStr, dStr] = dateStr.split('-');
@@ -412,18 +438,32 @@
             .filter((r) => r.tradeSide)
             .forEach((r) => {
               const tr = document.createElement('tr');
+              const paperTotal = Number(r.paperLongCumPnl) + Number(r.paperShortCumPnl);
+              const liveTotal = Number(r.liveLongCumPnl) + Number(r.liveShortCumPnl);
               const cells = [
                 r.timeIst,
                 r.tradeSide,
-                r.tradeEntry != null ? r.tradeEntry.toFixed(2) : '',
-                r.tradeExit != null ? r.tradeExit.toFixed(2) : '',
-                r.tradePnl != null ? r.tradePnl.toFixed(2) : '',
-                r.liveLongCumPnl.toFixed(2),
-                r.liveShortCumPnl.toFixed(2),
+                r.tradeEntry != null ? fmtNum(r.tradeEntry) : '',
+                r.tradeExit != null ? fmtNum(r.tradeExit) : '',
+                r.tradePnl != null ? fmtNum(r.tradePnl) : '',
+                fmtNum(r.paperLongCumPnl),
+                fmtNum(r.paperShortCumPnl),
+                fmtNum(paperTotal),
+                fmtNum(r.liveLongCumPnl),
+                fmtNum(r.liveShortCumPnl),
+                fmtNum(liveTotal),
               ];
-              cells.forEach((val) => {
+              cells.forEach((val, idx) => {
                 const td = document.createElement('td');
                 td.textContent = val;
+                if (idx === 0) td.className = 'left';
+                if (idx === 4) {
+                  const pnl = Number(r.tradePnl);
+                  if (Number.isFinite(pnl)) {
+                    if (pnl > 0) td.style.color = 'green';
+                    else if (pnl < 0) td.style.color = 'red';
+                  }
+                }
                 tr.appendChild(td);
               });
               tradesBody.appendChild(tr);

@@ -16,7 +16,7 @@ import {
   forceExitIfCumPnlNonPositive,
   tryOpenLiveFromPaperPosition,
 } from './liveEngine';
-import { LiveContext } from './liveStates';
+import { LiveContext, LiveState } from './liveStates';
 import { PaperTrade } from './types';
 import {
   registerPaperLongOpen,
@@ -529,6 +529,17 @@ function checkForNewTrades(): void {
       const trade = paperLongCtx.trades[i];
       const eventTs = trade.closedAt ?? Date.now();
       logPnlSnapshot(buildPnlSnapshot('TRADE_CLOSE', eventTs, trade));
+
+      // Practical behavior: when paper closes a position, also close the corresponding live position.
+      // This keeps live aligned with paper exits (independent of the cumPnL gate).
+      if (liveLongCtx.position.isOpen) {
+        liveLongCtx.position.isOpen = false;
+        liveLongCtx.position.entryPrice = null;
+        liveLongCtx.position.openedAt = null;
+        liveLongCtx.state = LiveState.IDLE;
+        liveLongCtx.lockUntilTs = undefined;
+        closeLiveLong(trade.exitPrice ?? currentPrice);
+      }
     }
     lastLongTradeCount = paperLongCtx.trades.length;
   }
@@ -539,6 +550,15 @@ function checkForNewTrades(): void {
       const trade = paperShortCtx.trades[i];
       const eventTs = trade.closedAt ?? Date.now();
       logPnlSnapshot(buildPnlSnapshot('TRADE_CLOSE', eventTs, trade));
+
+      if (liveShortCtx.position.isOpen) {
+        liveShortCtx.position.isOpen = false;
+        liveShortCtx.position.entryPrice = null;
+        liveShortCtx.position.openedAt = null;
+        liveShortCtx.state = LiveState.IDLE;
+        liveShortCtx.lockUntilTs = undefined;
+        closeLiveShort(trade.exitPrice ?? currentPrice);
+      }
     }
     lastShortTradeCount = paperShortCtx.trades.length;
   }
