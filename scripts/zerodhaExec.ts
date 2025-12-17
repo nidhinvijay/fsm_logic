@@ -2,6 +2,9 @@ import { loadEnvOnce, reloadEnv } from '../src/loadEnv';
 import express from 'express';
 import { KiteConnect } from 'kiteconnect';
 
+// Load env file early so /health reflects actual config on first request.
+loadEnvOnce();
+
 type ExecOrderRequest = {
   exchange: string;
   tradingsymbol: string;
@@ -53,12 +56,13 @@ async function main(): Promise<void> {
   app.use(express.json());
 
   app.get('/health', (_req, res) => {
+    const envPath = reloadEnv().path;
     res.json({
       ok: true,
       port,
       tradingEnabled: process.env.TRADING_ENABLED === '1',
       hasExecToken: Boolean(getAuthToken()),
-      envPath: reloadEnv().path,
+      envPath,
     });
   });
 
