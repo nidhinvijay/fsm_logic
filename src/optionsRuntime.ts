@@ -16,6 +16,7 @@ import { InstrumentInfo } from './instruments';
 import { logState } from './logger';
 import fs from 'fs';
 import path from 'path';
+import { sendZerodhaExecOrder } from './optionsExecution';
 
 export type TvAction = 'ENTRY' | 'EXIT';
 
@@ -70,6 +71,7 @@ interface OptionsRuntime {
   lastPrice: number | null;
   lastPaperWasOpen: boolean;
   lastTradeCount: number;
+  paperTrailHigh: number | null;
 
   liveRealizedCumPnl: number;
   liveEntryPrice: number | null;
@@ -135,6 +137,16 @@ function openLive(runtime: OptionsRuntime, entryPrice: number, nowTs: number) {
     cumPnlAfter: runtime.liveRealizedCumPnl,
   });
   if (runtime.liveTradeEvents.length > 50) runtime.liveTradeEvents.shift();
+
+  // Send to Zerodha executor (optional; controlled by /options/execution toggle)
+  // NOTE: sizing is currently fixed to 1 lot (instrument.lot).
+  void sendZerodhaExecOrder({
+    exchange: runtime.instrument.exchange,
+    tradingsymbol: runtime.instrument.zerodha,
+    transactionType: 'BUY',
+    quantity: runtime.instrument.lot,
+    refLtp: entryPrice,
+  });
 }
 
 function closeLive(runtime: OptionsRuntime, exitPrice: number, nowTs: number) {
@@ -159,6 +171,15 @@ function closeLive(runtime: OptionsRuntime, exitPrice: number, nowTs: number) {
     cumPnlAfter: runtime.liveRealizedCumPnl,
   });
   if (runtime.liveTradeEvents.length > 50) runtime.liveTradeEvents.shift();
+
+  // Send to Zerodha executor (optional; controlled by /options/execution toggle)
+  void sendZerodhaExecOrder({
+    exchange: runtime.instrument.exchange,
+    tradingsymbol: runtime.instrument.zerodha,
+    transactionType: 'SELL',
+    quantity: runtime.instrument.lot,
+    refLtp: exitPrice,
+  });
 
   // Persist live trade close so UI can show full-day history even after restarts.
   if (entry != null && pnl != null) {
@@ -242,6 +263,8 @@ function minuteKeyIst(tsMs: number): { datePart: string; minuteKey: string } {
   const timePart = iso.slice(11, 16);
   return { datePart, minuteKey: `${datePart} ${timePart}` };
 }
+
+const OPTIONS_TRAIL_STOP_POINTS = 4;
 
 function writeOptionsCsvRow(params: {
   symbolId: string;
@@ -346,6 +369,7 @@ export class OptionsRuntimeManager {
       lastPrice: null,
       lastPaperWasOpen: false,
       lastTradeCount: 0,
+      paperTrailHigh: null,
       liveRealizedCumPnl: 0,
       liveEntryPrice: null,
       liveTradeEvents: [],
@@ -434,8 +458,32 @@ export class OptionsRuntimeManager {
       }
     }
 
+    // Options paper trailing stop (BUY-only):
+    // - Keep the initial stop logic from the FSM (savedLTP - 0.5).
+    // - Once in a position, trail stop upwards at (bestLTP - OPTIONS_TRAIL_STOP_POINTS).
+    // - Stop only tightens (never loosens).
+    if (runtime.paperCtx.position.isOpen && runtime.paperCtx.position.side === 'BUY') {
+      if (runtime.paperTrailHigh != null) {
+        runtime.paperTrailHigh = Math.max(runtime.paperTrailHigh, ltp);
+        const trailStop = runtime.paperTrailHigh - OPTIONS_TRAIL_STOP_POINTS;
+        runtime.paperCtx.buyStop =
+          runtime.paperCtx.buyStop != null
+            ? Math.max(runtime.paperCtx.buyStop, trailStop)
+            : trailStop;
+      }
+    }
+
     const tick = { symbolId, ltp, ts: nowTs };
     onTick(runtime.paperCtx, tick);
+
+    // Initialize/clear trailing state based on the paper position.
+    if (runtime.paperCtx.position.isOpen && runtime.paperCtx.position.side === 'BUY') {
+      if (runtime.paperTrailHigh == null && runtime.paperCtx.position.entryPrice != null) {
+        runtime.paperTrailHigh = runtime.paperCtx.position.entryPrice;
+      }
+    } else {
+      runtime.paperTrailHigh = null;
+    }
 
     onLiveTick(runtime.liveCtx, nowTs);
 
@@ -610,6 +658,7 @@ export class OptionsRuntimeManager {
       rt.pendingExitRequestedAt = null;
       rt.lastPaperWasOpen = false;
       rt.lastTradeCount = rt.paperCtx.trades.length;
+      rt.paperTrailHigh = null;
       rt.lastMinuteKey = null;
       rt.lastMinuteSnapshot = null;
     }

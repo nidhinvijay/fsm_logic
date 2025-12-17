@@ -49,14 +49,18 @@
       Graph: <a href="/optionsgraph.html">/optionsgraph.html</a>
     </p>
 
-    <div style="margin: 10px 0; font-size: 12px;">
-      <button id="refreshBtn">Refresh</button>
-      <label style="margin-left: 10px;">
-        Date:
-        <input id="dateInput" type="date" />
-      </label>
-      <span id="status"></span>
-    </div>
+	    <div style="margin: 10px 0; font-size: 12px;">
+	      <button id="refreshBtn">Refresh</button>
+	      <label style="margin-left: 10px;">
+	        Date:
+	        <input id="dateInput" type="date" />
+	      </label>
+	      <label style="margin-left: 10px;">
+	        <input id="execToggle" type="checkbox" />
+	        Enable Zerodha execution
+	      </label>
+	      <span id="status"></span>
+	    </div>
 
     <table>
       <thead>
@@ -114,21 +118,54 @@
     </p>
     <div id="tradesBySymbol"></div>
 
-    <script>
-      const statusEl = document.getElementById('status');
-      const rowsEl = document.getElementById('rows');
-      const refreshBtn = document.getElementById('refreshBtn');
-      const dateInputEl = document.getElementById('dateInput');
-      const signalsRowsEl = document.getElementById('signalsRows');
-      const tradesBySymbolEl = document.getElementById('tradesBySymbol');
-      const rowByTradingview = new Map();
+	    <script>
+	      const statusEl = document.getElementById('status');
+	      const rowsEl = document.getElementById('rows');
+	      const refreshBtn = document.getElementById('refreshBtn');
+	      const dateInputEl = document.getElementById('dateInput');
+	      const execToggleEl = document.getElementById('execToggle');
+	      const signalsRowsEl = document.getElementById('signalsRows');
+	      const tradesBySymbolEl = document.getElementById('tradesBySymbol');
+	      const rowByTradingview = new Map();
 
-      function fmtNum(value) {
-        if (value == null) return '';
-        const n = Number(value);
-        if (!Number.isFinite(n)) return '';
-        return n.toFixed(2);
-      }
+	      function fmtNum(value) {
+	        if (value == null) return '';
+	        const n = Number(value);
+	        if (!Number.isFinite(n)) return '';
+	        return n.toFixed(2);
+	      }
+
+	      async function loadExecState() {
+	        try {
+	          const res = await fetch('/options/execution');
+	          const data = await res.json();
+	          execToggleEl.checked = Boolean(data && data.enabled);
+	        } catch {
+	          // ignore
+	        }
+	      }
+
+	      execToggleEl.addEventListener('change', async () => {
+	        const enabled = execToggleEl.checked;
+	        const token = window.prompt(
+	          'Control token (OPTIONS_EXEC_CONTROL_TOKEN). Leave empty if not set on server:',
+	        );
+	        try {
+	          const res = await fetch('/options/execution', {
+	            method: 'POST',
+	            headers: { 'Content-Type': 'application/json' },
+	            body: JSON.stringify({ enabled, token: token || '' }),
+	          });
+	          const data = await res.json().catch(() => ({}));
+	          if (!res.ok) {
+	            execToggleEl.checked = !enabled;
+	            alert(`Toggle failed: ${data && data.error ? data.error : res.status}`);
+	          }
+	        } catch (e) {
+	          execToggleEl.checked = !enabled;
+	          alert(`Toggle failed: ${String(e)}`);
+	        }
+	      });
 
       function fmtPos(p) {
         if (!p || !p.isOpen) return 'No position';
@@ -526,17 +563,18 @@
       dateInputEl.addEventListener('change', loadTrades);
 
       // default to today
-      (function initDate() {
-        const today = new Date();
-        const yyyy = today.getFullYear();
-        const mm = String(today.getMonth() + 1).padStart(2, '0');
-        const dd = String(today.getDate()).padStart(2, '0');
-        dateInputEl.value = `${yyyy}-${mm}-${dd}`;
-      })();
+	      (function initDate() {
+	        const today = new Date();
+	        const yyyy = today.getFullYear();
+	        const mm = String(today.getMonth() + 1).padStart(2, '0');
+	        const dd = String(today.getDate()).padStart(2, '0');
+	        dateInputEl.value = `${yyyy}-${mm}-${dd}`;
+	      })();
 
-      load();
-      loadTrades();
-      setInterval(load, 5000);
-    </script>
+	      loadExecState();
+	      load();
+	      loadTrades();
+	      setInterval(load, 5000);
+	    </script>
   </body>
 </html>

@@ -31,6 +31,7 @@ import { loadOptionsHistory } from './optionsHistory';
 import { resolveZerodhaTick } from './zerodhaFeed';
 import { loadEnvOnce } from './loadEnv';
 import { captureWebhookSignal, captureZerodhaTick } from './captureLogger';
+import { getOptionsExecutionState, setOptionsExecutionEnabled } from './optionsExecution';
 
 loadEnvOnce();
 
@@ -326,6 +327,57 @@ let currentPrice = 100;
 const TICK_STEP = 0.5;
 const SIM_INTERVAL_MS = 1000;
 const DELTA_INTERVAL_MS = 1000;
+
+// BTC paper trailing stop:
+// Keep initial FSM stop logic (savedLTP ± 0.5), then tighten stop once a position is open.
+const BTC_TRAIL_STOP_POINTS = 4;
+let btcLongTrailHigh: number | null = null;
+let btcShortTrailLow: number | null = null;
+
+function applyBtcTrailingStopsBeforeTick(ltp: number): void {
+  // LONG paper (BUY)
+  if (paperLongCtx.position.isOpen && paperLongCtx.position.side === 'BUY') {
+    if (btcLongTrailHigh != null) {
+      btcLongTrailHigh = Math.max(btcLongTrailHigh, ltp);
+      const trailStop = btcLongTrailHigh - BTC_TRAIL_STOP_POINTS;
+      paperLongCtx.buyStop =
+        paperLongCtx.buyStop != null
+          ? Math.max(paperLongCtx.buyStop, trailStop)
+          : trailStop;
+    }
+  }
+
+  // SHORT paper (SELL)
+  if (paperShortCtx.position.isOpen && paperShortCtx.position.side === 'SELL') {
+    if (btcShortTrailLow != null) {
+      btcShortTrailLow = Math.min(btcShortTrailLow, ltp);
+      const trailStop = btcShortTrailLow + BTC_TRAIL_STOP_POINTS;
+      paperShortCtx.sellStop =
+        paperShortCtx.sellStop != null
+          ? Math.min(paperShortCtx.sellStop, trailStop)
+          : trailStop;
+    }
+  }
+}
+
+function syncBtcTrailingStateAfterTick(): void {
+  // Initialize trailing anchors after a position opens (entry happens inside onTick).
+  if (paperLongCtx.position.isOpen && paperLongCtx.position.side === 'BUY') {
+    if (btcLongTrailHigh == null) {
+      btcLongTrailHigh = paperLongCtx.position.entryPrice ?? currentPrice;
+    }
+  } else {
+    btcLongTrailHigh = null;
+  }
+
+  if (paperShortCtx.position.isOpen && paperShortCtx.position.side === 'SELL') {
+    if (btcShortTrailLow == null) {
+      btcShortTrailLow = paperShortCtx.position.entryPrice ?? currentPrice;
+    }
+  } else {
+    btcShortTrailLow = null;
+  }
+}
 
 // Track last day (in IST) when we ran daily reset
 let lastDailyResetIstDate: string | null = null;
@@ -678,6 +730,8 @@ function runDailyResetIfNeeded(nowUtcMs: number) {
     liveShortCumPnl = 0;
     liveLongEntryPrice = null;
     liveShortEntryPrice = null;
+    btcLongTrailHigh = null;
+    btcShortTrailLow = null;
 
     logState('Daily reset at 05:30 IST completed', {
       istDate: istDateKey,
@@ -732,9 +786,13 @@ async function pollDeltaOnce(): Promise<void> {
       ts: now,
     };
 
+    applyBtcTrailingStopsBeforeTick(currentPrice);
+
     // feed both paper engines
     onTick(paperLongCtx, tick);
     onTick(paperShortCtx, tick);
+
+    syncBtcTrailingStateAfterTick();
 
     // update live engines (for lock expiry etc.)
     onLiveTick(liveLongCtx, now);
@@ -840,8 +898,12 @@ setInterval(() => {
     ts: now,
   };
 
+  applyBtcTrailingStopsBeforeTick(currentPrice);
+
   onTick(paperLongCtx, tick);
   onTick(paperShortCtx, tick);
+
+  syncBtcTrailingStateAfterTick();
 
   onLiveTick(liveLongCtx, now);
   onLiveTick(liveShortCtx, now);
@@ -1361,8 +1423,12 @@ app.post('/tick', (req, res) => {
     ts: now,
   };
 
+  applyBtcTrailingStopsBeforeTick(currentPrice);
+
   onTick(paperLongCtx, tick);
   onTick(paperShortCtx, tick);
+
+  syncBtcTrailingStateAfterTick();
 
   onLiveTick(liveLongCtx, now);
   onLiveTick(liveShortCtx, now);
@@ -1431,6 +1497,32 @@ app.get('/options/instruments', (_req, res) => {
 // GET /options/state → current paper/live PnL + state per instrument
 app.get('/options/state', (_req, res) => {
   res.json({ rows: optionsManager.getSnapshots() });
+});
+
+// --- Options: live execution toggle (for Zerodha executor integration) ---
+// Default OFF; enable only when zerodha-exec is running and configured.
+app.get('/options/execution', (_req, res) => {
+  res.json(getOptionsExecutionState());
+});
+
+app.post('/options/execution', (req, res) => {
+  const body = req.body as { enabled?: unknown; token?: unknown };
+  const enabled = body.enabled === true;
+
+  // Require a control token if configured.
+  const expected = (process.env.OPTIONS_EXEC_CONTROL_TOKEN || '').trim();
+  if (expected) {
+    const provided =
+      (typeof body.token === 'string' ? body.token : '') ||
+      String(req.headers['x-exec-control-token'] || '');
+    if (String(provided || '').trim() !== expected) {
+      return res.status(403).json({ error: 'forbidden' });
+    }
+  }
+
+  setOptionsExecutionEnabled(enabled);
+  logState('Options execution toggled', { enabled });
+  return res.json({ ok: true, enabled });
 });
 
 // GET /zerodha/callback

@@ -13,7 +13,9 @@
     "zerodha:ticks": "ts-node scripts/zerodhaTicks.ts",
     "zerodha:ticks:prod": "node dist/scripts/zerodhaTicks.js",
     "zerodha:session": "ts-node scripts/zerodhaSession.ts",
-    "zerodha:session:prod": "node dist/scripts/zerodhaSession.js"
+    "zerodha:session:prod": "node dist/scripts/zerodhaSession.js",
+    "zerodha:exec": "ts-node scripts/zerodhaExec.ts",
+    "zerodha:exec:prod": "node dist/scripts/zerodhaExec.js"
   },
   "keywords": [],
   "author": "",

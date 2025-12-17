@@ -27,6 +27,30 @@ pm2 start dist/scripts/zerodhaTicks.js --name zerodha-ticks
 pm2 save
 ```
 
+## Zerodha executor (options live orders, PM2)
+
+This is a separate local service that calls Kite Connect `placeOrder()` (IOC limit).
+
+Env (example):
+- `ZERODHA_EXEC_PORT=3200`
+- `ZERODHA_EXEC_TOKEN=...` (shared secret for `/order`)
+- `TRADING_ENABLED=0` (default; set to `1` only when ready)
+
+Start:
+```bash
+pm2 delete zerodha-exec || true
+pm2 start dist/scripts/zerodhaExec.js --name zerodha-exec
+pm2 save
+```
+
+FSM toggle (default OFF):
+- `POST /options/execution` with `{ "enabled": true, "token": "..." }`
+- If set, protect with `OPTIONS_EXEC_CONTROL_TOKEN=...`
+
+FSM → executor config:
+- `ZERODHA_EXEC_URL=http://127.0.0.1:3200`
+- `ZERODHA_EXEC_TOKEN=...` (must match executor)
+
 ## Capture + Replay (optional debugging)
 
 If you want to debug a full trading session without waiting for the next day, you can run a **separate** capture proxy that:
