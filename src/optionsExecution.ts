@@ -11,6 +11,13 @@ export function getOptionsExecutionState(): { enabled: boolean } {
   return { enabled };
 }
 
+function getMaxPremiumInr(): number | null {
+  const raw = (process.env.OPTIONS_MAX_PREMIUM_INR || '').trim();
+  if (!raw) return null;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
 function getExecBaseUrl(): string {
   return (process.env.ZERODHA_EXEC_URL || 'http://127.0.0.1:3200').trim();
 }
@@ -46,6 +53,25 @@ export async function sendZerodhaExecOrder(params: {
     params.transactionType === 'BUY'
       ? params.refLtp + 1
       : params.refLtp - 1;
+
+  // Safety: avoid placing BUY orders whose notional premium exceeds the budget cap.
+  // Note: allow SELL (exits) regardless of cap.
+  const maxPremiumInr = getMaxPremiumInr();
+  if (params.transactionType === 'BUY' && maxPremiumInr != null) {
+    const notional = price * params.quantity;
+    if (Number.isFinite(notional) && notional > maxPremiumInr) {
+      logState('Zerodha exec BUY skipped (budget cap)', {
+        exchange: params.exchange,
+        tradingsymbol: params.tradingsymbol,
+        quantity: params.quantity,
+        refLtp: params.refLtp,
+        price,
+        notional,
+        maxPremiumInr,
+      });
+      return;
+    }
+  }
 
   try {
     const res = await fetch(`${baseUrl}/order`, {
@@ -86,4 +112,3 @@ export async function sendZerodhaExecOrder(params: {
     });
   }
 }
-

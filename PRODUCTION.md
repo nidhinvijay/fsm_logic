@@ -35,6 +35,7 @@ Env (example):
 - `ZERODHA_EXEC_PORT=3200`
 - `ZERODHA_EXEC_TOKEN=...` (shared secret for `/order`)
 - `TRADING_ENABLED=0` (default; set to `1` only when ready)
+- `OPTIONS_MAX_PREMIUM_INR=25000` (optional safety cap; skips BUY if premium*qty exceeds)
 
 Start:
 ```bash
