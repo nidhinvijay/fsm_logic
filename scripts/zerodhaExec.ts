@@ -49,6 +49,29 @@ function getKite(): any {
   return kc;
 }
 
+function serializeError(err: unknown): { summary: string; raw: unknown } {
+  if (err == null) return { summary: 'null', raw: err };
+  if (typeof err === 'string') return { summary: err, raw: err };
+  if (err instanceof Error) {
+    const anyErr = err as any;
+    const extra = anyErr && typeof anyErr === 'object' ? anyErr : {};
+    return {
+      summary: err.message || String(err),
+      raw: {
+        name: err.name,
+        message: err.message,
+        stack: err.stack,
+        ...extra,
+      },
+    };
+  }
+  try {
+    return { summary: JSON.stringify(err), raw: err };
+  } catch {
+    return { summary: String(err), raw: err };
+  }
+}
+
 async function main(): Promise<void> {
   const port = Number(process.env.ZERODHA_EXEC_PORT || '3200');
   const app = express();
@@ -108,7 +131,14 @@ async function main(): Promise<void> {
 
       return res.json({ ok: true, order });
     } catch (err) {
-      return res.status(502).json({ error: 'place_order_failed', detail: String(err) });
+      const info = serializeError(err);
+      // eslint-disable-next-line no-console
+      console.error('[zerodha-exec] placeOrder failed', info.summary, info.raw);
+      return res.status(502).json({
+        error: 'place_order_failed',
+        detail: info.summary,
+        raw: info.raw,
+      });
     }
   });
 
