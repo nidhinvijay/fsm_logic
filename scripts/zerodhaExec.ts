@@ -35,11 +35,13 @@ function isAuthorized(req: express.Request): boolean {
   return provided === expected;
 }
 
-function getKite(): KiteConnect {
+function getKite(): any {
   loadEnvOnce();
   const apiKey = requireEnv('KITE_API_KEY');
   const accessToken = requireEnv('KITE_ACCESS_TOKEN');
-  const kc = new KiteConnect({ api_key: apiKey } as any);
+  // `kiteconnect` typings are incomplete in some versions; use runtime API via `any`.
+  const KC: any = KiteConnect as any;
+  const kc: any = new KC({ api_key: apiKey });
   kc.setAccessToken(accessToken);
   return kc;
 }
@@ -89,16 +91,16 @@ async function main(): Promise<void> {
 
     try {
       const kc = getKite();
-      const order = await kc.placeOrder(kc.VARIETY_REGULAR, {
-        exchange: exchange as any,
+      const order = await kc.placeOrder('regular', {
+        exchange,
         tradingsymbol,
-        transaction_type: transaction_type as any,
+        transaction_type,
         quantity,
-        product: kc.PRODUCT_MIS,
-        order_type: kc.ORDER_TYPE_LIMIT,
+        product: 'MIS',
+        order_type: 'LIMIT',
         price,
-        validity: kc.VALIDITY_IOC,
-      } as any);
+        validity: 'IOC',
+      });
 
       return res.json({ ok: true, order });
     } catch (err) {
@@ -121,4 +123,3 @@ main().catch((e) => {
   console.error('[zerodha-exec] fatal', String(e));
   process.exit(1);
 });
-
