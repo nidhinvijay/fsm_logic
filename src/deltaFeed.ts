@@ -28,6 +28,7 @@ export function startDeltaFeed(
   const connect = () => {
     logger.info('Connecting to Delta WebSocket');
     ws = new WebSocket(DELTA_WS_URL);
+    let loggedFirstData = false;
 
     ws.on('open', () => {
       logger.info('Delta WebSocket connected');
@@ -64,13 +65,33 @@ export function startDeltaFeed(
 
         if (!shouldProcess()) return;
 
-        // l1_orderbook Response (docs):
+        // Delta docs show `l1_orderbook` (full fields) and also mention legacy `l1ob` shorthand.
+        // Handle both to avoid silently missing updates due to schema differences.
+        //
+        // l1_orderbook sample:
         // { type:"l1_orderbook", symbol:"BTCUSD", best_bid:"...", best_ask:"..." }
-        // Prefer mid price when possible; fallback to bid/ask.
-        if (msg?.type !== 'l1_orderbook' || msg?.symbol !== SYMBOL) return;
+        //
+        // l1ob sample (docs comment):
+        // { type:"l1ob", s:"BTCUSD", d:[BestAskPrice,BestAskSize,BestBidPrice,BestBidSize], ... }
+        const type = String(msg?.type || '');
+        const symbol = String(msg?.symbol || msg?.s || '');
+        if (symbol !== SYMBOL) return;
 
-        const bid = Number(msg.best_bid);
-        const ask = Number(msg.best_ask);
+        let bid: number = Number.NaN;
+        let ask: number = Number.NaN;
+
+        if (type === 'l1_orderbook') {
+          bid = Number(msg.best_bid);
+          ask = Number(msg.best_ask);
+        } else if (type === 'l1ob') {
+          const d = Array.isArray(msg.d) ? msg.d : null;
+          // [BestAskPrice, BestAskSize, BestBidPrice, BestBidSize]
+          ask = d ? Number(d[0]) : Number.NaN;
+          bid = d ? Number(d[2]) : Number.NaN;
+        } else {
+          return;
+        }
+
         const price =
           Number.isFinite(bid) && Number.isFinite(ask)
             ? (bid + ask) / 2
@@ -82,6 +103,11 @@ export function startDeltaFeed(
         if (!Number.isFinite(price)) {
           logger.warn('Delta WS: bad price', msg);
           return;
+        }
+
+        if (!loggedFirstData) {
+          loggedFirstData = true;
+          logger.info('Delta WS first price', { type, symbol, bid, ask, price });
         }
 
         const now = Date.now();
