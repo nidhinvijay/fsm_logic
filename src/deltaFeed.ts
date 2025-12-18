@@ -1,63 +1,126 @@
-// src/deltaFeed.ts
-import fetch from 'node-fetch';
+import WebSocket from 'ws';
 import { FSMContext } from './fsmStates';
 import { LiveContext } from './liveStates';
-import { onTick } from './fsmEngine';
-import { onLiveTick } from './liveEngine';
 import { logger } from './logger';
 
-const DELTA_BASE_URL = 'https://api.delta.exchange';
+// Delta India production WS:
+// https://docs.delta.exchange/#websocket-feed
+const DELTA_WS_URL = 'wss://socket.india.delta.exchange';
 const SYMBOL = 'BTCUSD';
-const INTERVAL_MS = 1000; // 1s polling
+
+// heartbeat to keep connection alive
+const HEARTBEAT_TIMEOUT_MS = 35_000;
+// reconnect delay
+const RECONNECT_MS = 3_000;
 
 export function startDeltaFeed(
-  paperLong: FSMContext,
-  paperShort: FSMContext,
-  liveLong: LiveContext,
-  liveShort: LiveContext,
+  _paperLong: FSMContext,
+  _paperShort: FSMContext,
+  _liveLong: LiveContext,
+  _liveShort: LiveContext,
   setCurrentPrice: (p: number) => void,
+  onPrice: (p: number, nowTs: number) => void,
+  shouldProcess: () => boolean,
 ) {
-  setInterval(async () => {
-    try {
-      // Futures / perpetual tickers – BTCUSD
-      const url = `${DELTA_BASE_URL}/v2/tickers?contract_types=perpetual_futures&symbol=${SYMBOL}`;
-      const res = await fetch(url);
+  let ws: WebSocket | null = null;
+  let heartbeatTimeout: NodeJS.Timeout | null = null;
 
-      if (!res.ok) {
-        logger.warn('Delta ticker HTTP error', { status: res.status });
-        return;
+  const connect = () => {
+    logger.info('Connecting to Delta WebSocket');
+    ws = new WebSocket(DELTA_WS_URL);
+
+    ws.on('open', () => {
+      logger.info('Delta WebSocket connected');
+
+      // Enable server-sent heartbeat messages (recommended by Delta docs).
+      ws?.send(JSON.stringify({ type: 'enable_heartbeat' }));
+
+      // Subscribe to best bid/ask (L1 orderbook).
+      // Publish interval: 100ms (max 5s if unchanged).
+      ws?.send(
+        JSON.stringify({
+          type: 'subscribe',
+          payload: {
+            channels: [
+              {
+                name: 'l1_orderbook',
+                symbols: [SYMBOL],
+              },
+            ],
+          },
+        }),
+      );
+      resetHeartbeatTimeout();
+    });
+
+    ws.on('message', (raw) => {
+      try {
+        const msg = JSON.parse(raw.toString());
+
+        if (msg && msg.type === 'heartbeat') {
+          resetHeartbeatTimeout();
+          return;
+        }
+
+        if (!shouldProcess()) return;
+
+        // l1_orderbook Response (docs):
+        // { type:"l1_orderbook", symbol:"BTCUSD", best_bid:"...", best_ask:"..." }
+        // Prefer mid price when possible; fallback to bid/ask.
+        if (msg?.type !== 'l1_orderbook' || msg?.symbol !== SYMBOL) return;
+
+        const bid = Number(msg.best_bid);
+        const ask = Number(msg.best_ask);
+        const price =
+          Number.isFinite(bid) && Number.isFinite(ask)
+            ? (bid + ask) / 2
+            : Number.isFinite(bid)
+              ? bid
+              : Number.isFinite(ask)
+                ? ask
+                : NaN;
+        if (!Number.isFinite(price)) {
+          logger.warn('Delta WS: bad price', msg);
+          return;
+        }
+
+        const now = Date.now();
+        setCurrentPrice(price);
+        onPrice(price, now);
+      } catch (err) {
+        logger.error('Delta WS message error', { err });
       }
+    });
 
-      const body = (await res.json()) as any;
-      const ticker = Array.isArray(body.result)
-        ? body.result.find((t: any) => t.symbol === SYMBOL)
-        : body.result;
-      if (!ticker || ticker.symbol !== SYMBOL) {
-        logger.warn('Delta ticker: BTCUSD not found in result', body);
-        return;
+    ws.on('close', (code, reason) => {
+      logger.warn('Delta WS closed', { code, reason: reason.toString() });
+      cleanup();
+      setTimeout(connect, RECONNECT_MS);
+    });
+
+    ws.on('error', (err) => {
+      logger.error('Delta WS error', { err });
+      ws?.close();
+    });
+  };
+
+  const resetHeartbeatTimeout = () => {
+    if (heartbeatTimeout) clearTimeout(heartbeatTimeout);
+    heartbeatTimeout = setTimeout(() => {
+      logger.warn('Delta WS heartbeat timeout; reconnecting');
+      try {
+        ws?.close();
+      } catch {
+        // ignore
       }
+    }, HEARTBEAT_TIMEOUT_MS);
+  };
 
-      // mark_price is what Delta docs and examples use for LTP :contentReference[oaicite:1]{index=1}
-      const price = Number(ticker.mark_price ?? ticker.last_price);
-      if (!Number.isFinite(price)) {
-        logger.warn('Delta ticker: bad price', { ticker });
-        return;
-      }
+  const cleanup = () => {
+    if (heartbeatTimeout) clearTimeout(heartbeatTimeout);
+    heartbeatTimeout = null;
+    ws = null;
+  };
 
-      const now = Date.now();
-      setCurrentPrice(price);
-
-      const tick = { symbolId: SYMBOL, ltp: price, ts: now };
-
-      // feed both paper engines
-      onTick(paperLong, tick);
-      onTick(paperShort, tick);
-
-      // update live engines (for lock expiry etc.)
-      onLiveTick(liveLong, now);
-      onLiveTick(liveShort, now);
-    } catch (err) {
-      logger.error('Delta ticker fetch failed', { err });
-    }
-  }, INTERVAL_MS);
+  connect();
 }

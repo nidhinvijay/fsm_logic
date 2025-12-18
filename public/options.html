@@ -574,7 +574,8 @@
 	      loadExecState();
 	      load();
 	      loadTrades();
-	      setInterval(load, 5000);
-	    </script>
+      const UI_REFRESH_MS = 2000;
+      setInterval(load, UI_REFRESH_MS);
+    </script>
   </body>
 </html>

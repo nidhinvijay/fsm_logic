@@ -22,20 +22,22 @@
   "license": "ISC",
   "description": "",
   "devDependencies": {
-    "@types/express": "^5.0.6",
     "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.6",
     "@types/node": "^24.10.1",
     "@types/winston": "^2.4.4",
+    "@types/ws": "^8.18.1",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.3",
     "winston": "^3.19.0"
   },
   "dependencies": {
-    "cors": "^2.8.5",
     "@types/node-fetch": "^2.6.13",
+    "cors": "^2.8.5",
     "dotenv": "^16.6.1",
     "express": "^5.2.1",
     "kiteconnect": "^5.0.0",
-    "node-fetch": "^2.7.0"
+    "node-fetch": "^2.7.0",
+    "ws": "^8.18.3"
   }
 }

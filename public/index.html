@@ -77,13 +77,15 @@
     <div class="card">
       <h2>Feed & Auto Tick Control</h2>
       <p>
-        <strong>Feed Mode:</strong>
-        <span id="feedMode">-</span> |
-        <strong>Current LTP:</strong>
-        <span id="currentPrice">-</span> |
-        <strong>Auto Mode:</strong>
-        <span id="autoMode">PAUSE</span>
-      </p>
+	        <strong>Feed Mode:</strong>
+	        <span id="feedMode">-</span> |
+	        <strong>Current LTP:</strong>
+	        <span id="currentPrice">-</span> |
+	        <strong>Last Tick:</strong>
+	        <span id="lastTickAge">-</span> |
+	        <strong>Auto Mode:</strong>
+	        <span id="autoMode">PAUSE</span>
+	      </p>
       <label>
         Start / Reset Price:
         <input id="startPrice" type="number" step="0.1" value="100" />
@@ -625,14 +627,25 @@
         renderState(data.state);
       }
 
-      function renderState(state) {
-        if (!state) return;
+	      function renderState(state) {
+	        if (!state) return;
 
         const feedMode = state.feedMode || 'DELTA';
         document.getElementById('feedMode').textContent = feedMode;
 
-        document.getElementById('currentPrice').textContent =
-          state.currentPrice ?? '-';
+	        const cp =
+	          typeof state.currentPrice === 'number' && Number.isFinite(state.currentPrice)
+	            ? state.currentPrice.toFixed(3)
+	            : '-';
+	        document.getElementById('currentPrice').textContent = cp;
+
+	        const lastTickAgeEl = document.getElementById('lastTickAge');
+	        if (typeof state.lastBtcTickTs === 'number' && Number.isFinite(state.lastBtcTickTs)) {
+	          const ageMs = Math.max(0, Date.now() - state.lastBtcTickTs);
+	          lastTickAgeEl.textContent = `${ageMs}ms ago`;
+	        } else {
+	          lastTickAgeEl.textContent = '-';
+	        }
         document.getElementById('autoMode').textContent =
           state.autoMode ?? 'PAUSE';
 
@@ -935,9 +948,10 @@
         unrealizedEl.textContent = unrealized.toFixed(2);
       }
 
-      setInterval(fetchState, 2000);
-      setInterval(fetchLogs, 2000);
-      setInterval(fetchRecentSignals, 2000);
+      const UI_REFRESH_MS = 1000;
+      setInterval(fetchState, UI_REFRESH_MS);
+      setInterval(fetchLogs, UI_REFRESH_MS);
+      setInterval(fetchRecentSignals, UI_REFRESH_MS);
       fetchState();
       fetchLogs();
       fetchRecentSignals();

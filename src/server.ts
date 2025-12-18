@@ -32,6 +32,7 @@ import { resolveZerodhaTick } from './zerodhaFeed';
 import { loadEnvOnce } from './loadEnv';
 import { captureWebhookSignal, captureZerodhaTick } from './captureLogger';
 import { getOptionsExecutionState, setOptionsExecutionEnabled } from './optionsExecution';
+import { startDeltaFeed } from './deltaFeed';
 
 loadEnvOnce();
 
@@ -326,7 +327,7 @@ let autoMode: AutoMode = 'PAUSE'; // used only in SIM mode
 let currentPrice = 100;
 const TICK_STEP = 0.5;
 const SIM_INTERVAL_MS = 1000;
-const DELTA_INTERVAL_MS = 1000;
+let lastBtcTickTs: number | null = null;
 
 // BTC paper trailing stop:
 // Keep initial FSM stop logic (savedLTP ± 0.5), then tighten stop once a position is open.
@@ -574,6 +575,81 @@ function recordMinuteHeartbeat(nowTs: number): void {
   recordPnlMinute(buildPnlSnapshot('MINUTE', nowTs));
 }
 
+let lastBtcHeartbeatTs: number | null = null;
+
+function processBtcTick(nowTs: number, ltp: number): void {
+  runDailyResetIfNeeded(nowTs);
+  currentPrice = ltp;
+  lastBtcTickTs = nowTs;
+
+  const tick = {
+    symbolId: 'BTCUSD',
+    ltp: currentPrice,
+    ts: nowTs,
+  };
+
+  applyBtcTrailingStopsBeforeTick(currentPrice);
+
+  onTick(paperLongCtx, tick);
+  onTick(paperShortCtx, tick);
+
+  syncBtcTrailingStateAfterTick();
+
+  onLiveTick(liveLongCtx, nowTs);
+  onLiveTick(liveShortCtx, nowTs);
+
+  const cumPnlTotal = getTotalCumPnl();
+
+  if (
+    forceExitIfCumPnlNonPositive(liveLongCtx, cumPnlTotal, nowTs) ===
+    'CLOSE_POSITION'
+  ) {
+    closeLiveLong(currentPrice);
+  }
+  if (
+    forceExitIfCumPnlNonPositive(liveShortCtx, cumPnlTotal, nowTs) ===
+    'CLOSE_POSITION'
+  ) {
+    closeLiveShort(currentPrice);
+  }
+
+  if (paperLongCtx.position.isOpen) {
+    const action = tryOpenLiveFromPaperPosition(liveLongCtx, cumPnlTotal, nowTs);
+    if (action === 'OPEN_POSITION' && paperLongCtx.position.entryPrice != null) {
+      logState('LIVE LONG opening from already-open paper position', {
+        paperEntryPrice: paperLongCtx.position.entryPrice,
+        liveEntryPrice: currentPrice,
+        cumPnlTotal,
+        nowTs,
+      });
+      liveLongCtx.position.entryPrice = currentPrice;
+      openLiveLong(currentPrice);
+    }
+  }
+
+  if (paperShortCtx.position.isOpen) {
+    const action = tryOpenLiveFromPaperPosition(liveShortCtx, cumPnlTotal, nowTs);
+    if (action === 'OPEN_POSITION' && paperShortCtx.position.entryPrice != null) {
+      logState('LIVE SHORT opening from already-open paper position', {
+        paperEntryPrice: paperShortCtx.position.entryPrice,
+        liveEntryPrice: currentPrice,
+        cumPnlTotal,
+        nowTs,
+      });
+      liveShortCtx.position.entryPrice = currentPrice;
+      openLiveShort(currentPrice);
+    }
+  }
+
+  checkForNewTrades();
+
+  // PnL history is per-minute; throttle heartbeats to ~1Hz even if price feed is faster.
+  if (lastBtcHeartbeatTs == null || nowTs - lastBtcHeartbeatTs >= 1000) {
+    lastBtcHeartbeatTs = nowTs;
+    recordMinuteHeartbeat(nowTs);
+  }
+}
+
 function checkForNewTrades(): void {
   // LONG side
   if (paperLongCtx.trades.length > lastLongTradeCount) {
@@ -644,6 +720,7 @@ function getStateSnapshot() {
   return {
     feedMode,
     currentPrice,
+    lastBtcTickTs,
     autoMode,
 
     cumPnlTotal: getTotalCumPnl(),
@@ -740,139 +817,18 @@ function runDailyResetIfNeeded(nowUtcMs: number) {
   }
 }
 
-// --- Delta live feed (primary mode) ---
-
-const DELTA_BASE_URL = 'https://api.delta.exchange';
-const DELTA_SYMBOL = 'BTCUSD';
-
-async function pollDeltaOnce(): Promise<void> {
-  if (feedMode !== 'DELTA') return;
-
-  try {
-    // Use perpetual futures ticker for BTCUSD
-    const url = `${DELTA_BASE_URL}/v2/tickers?contract_types=perpetual_futures&symbol=${DELTA_SYMBOL}`;
-    const res = await fetch(url);
-
-    if (!res.ok) {
-      console.warn('Delta ticker HTTP error', { status: res.status });
-      return;
-    }
-
-    const body = (await res.json()) as any;
-    const ticker = Array.isArray(body.result)
-      ? body.result.find((t: any) => t.symbol === DELTA_SYMBOL)
-      : body.result;
-
-    if (!ticker || ticker.symbol !== DELTA_SYMBOL) {
-      console.warn('Delta ticker: BTCUSD not found in result', body);
-      return;
-    }
-
-    const price = Number(
-      ticker.mark_price ?? ticker.last_price ?? ticker.close,
-    );
-    if (!Number.isFinite(price)) {
-      console.warn('Delta ticker: bad price', { ticker });
-      return;
-    }
-
-    const now = Date.now();
-    runDailyResetIfNeeded(now);
-    currentPrice = price;
-
-    const tick = {
-      symbolId: 'BTCUSD',
-      ltp: currentPrice,
-      ts: now,
-    };
-
-    applyBtcTrailingStopsBeforeTick(currentPrice);
-
-    // feed both paper engines
-    onTick(paperLongCtx, tick);
-    onTick(paperShortCtx, tick);
-
-    syncBtcTrailingStateAfterTick();
-
-    // update live engines (for lock expiry etc.)
-    onLiveTick(liveLongCtx, now);
-    onLiveTick(liveShortCtx, now);
-
-    // Immediate live exit check based on total cum PnL
-    const cumPnlTotal = getTotalCumPnl();
-    if (
-      forceExitIfCumPnlNonPositive(liveLongCtx, cumPnlTotal, now) ===
-      'CLOSE_POSITION'
-    ) {
-      // Close LONG → SELL
-      closeLiveLong(currentPrice);
-    }
-    if (
-      forceExitIfCumPnlNonPositive(liveShortCtx, cumPnlTotal, now) ===
-      'CLOSE_POSITION'
-    ) {
-      // Close SHORT → BUY
-      closeLiveShort(currentPrice);
-    }
-
-    // Live entry check from existing paper positions when cumPnl > 0
-    if (paperLongCtx.position.isOpen) {
-      const action = tryOpenLiveFromPaperPosition(
-        liveLongCtx,
-        cumPnlTotal,
-        now,
-      );
-      if (
-        action === 'OPEN_POSITION' &&
-        paperLongCtx.position.entryPrice != null
-      ) {
-        // Live is starting AFTER the paper entry; use currentPrice as the live entry
-        // (using the paper entry here can create an instant, incorrect PnL jump).
-        logState('LIVE LONG opening from already-open paper position', {
-          paperEntryPrice: paperLongCtx.position.entryPrice,
-          liveEntryPrice: currentPrice,
-          cumPnlTotal,
-          nowTs: now,
-        });
-        liveLongCtx.position.entryPrice = currentPrice;
-        // Open LONG → BUY
-        openLiveLong(currentPrice);
-      }
-    }
-
-    if (paperShortCtx.position.isOpen) {
-      const action = tryOpenLiveFromPaperPosition(
-        liveShortCtx,
-        cumPnlTotal,
-        now,
-      );
-      if (
-        action === 'OPEN_POSITION' &&
-        paperShortCtx.position.entryPrice != null
-      ) {
-        // Live is starting AFTER the paper entry; use currentPrice as the live entry.
-        logState('LIVE SHORT opening from already-open paper position', {
-          paperEntryPrice: paperShortCtx.position.entryPrice,
-          liveEntryPrice: currentPrice,
-          cumPnlTotal,
-          nowTs: now,
-        });
-        liveShortCtx.position.entryPrice = currentPrice;
-        // Open SHORT → SELL
-        openLiveShort(currentPrice);
-      }
-    }
-
-    // After processing this tick, check if any paper trades just closed
-    checkForNewTrades();
-    recordMinuteHeartbeat(now);
-  } catch (err) {
-    console.error('Delta ticker fetch failed', err);
-  }
-}
-
-// poll Delta every second
-setInterval(pollDeltaOnce, DELTA_INTERVAL_MS);
+// --- Delta live feed (primary mode, WebSocket) ---
+startDeltaFeed(
+  paperLongCtx,
+  paperShortCtx,
+  liveLongCtx,
+  liveShortCtx,
+  (p) => {
+    currentPrice = p;
+  },
+  (p, nowTs) => processBtcTick(nowTs, p),
+  () => feedMode === 'DELTA',
+);
 
 // --- SIM feed (manual / auto) ---
 
@@ -891,88 +847,7 @@ setInterval(() => {
   }
 
   const now = Date.now();
-  runDailyResetIfNeeded(now);
-  const tick = {
-    symbolId: 'BTCUSD',
-    ltp: currentPrice,
-    ts: now,
-  };
-
-  applyBtcTrailingStopsBeforeTick(currentPrice);
-
-  onTick(paperLongCtx, tick);
-  onTick(paperShortCtx, tick);
-
-  syncBtcTrailingStateAfterTick();
-
-  onLiveTick(liveLongCtx, now);
-  onLiveTick(liveShortCtx, now);
-
-  // Immediate live exit check based on total cum PnL
-  const cumPnlTotal = getTotalCumPnl();
-  if (
-    forceExitIfCumPnlNonPositive(liveLongCtx, cumPnlTotal, now) ===
-    'CLOSE_POSITION'
-  ) {
-    // Close LONG → SELL
-    closeLiveLong(currentPrice);
-  }
-  if (
-    forceExitIfCumPnlNonPositive(liveShortCtx, cumPnlTotal, now) ===
-    'CLOSE_POSITION'
-  ) {
-    // Close SHORT → BUY
-    closeLiveShort(currentPrice);
-  }
-
-  // Live entry check from existing paper positions when cumPnl > 0
-  if (paperLongCtx.position.isOpen) {
-    const action = tryOpenLiveFromPaperPosition(
-      liveLongCtx,
-      cumPnlTotal,
-      now,
-    );
-    if (
-      action === 'OPEN_POSITION' &&
-      paperLongCtx.position.entryPrice != null
-    ) {
-      logState('LIVE LONG opening from already-open paper position (SIM)', {
-        paperEntryPrice: paperLongCtx.position.entryPrice,
-        liveEntryPrice: currentPrice,
-        cumPnlTotal,
-        nowTs: now,
-      });
-      liveLongCtx.position.entryPrice = currentPrice;
-      // Open LONG → BUY
-      openLiveLong(currentPrice);
-    }
-  }
-
-  if (paperShortCtx.position.isOpen) {
-    const action = tryOpenLiveFromPaperPosition(
-      liveShortCtx,
-      cumPnlTotal,
-      now,
-    );
-    if (
-      action === 'OPEN_POSITION' &&
-      paperShortCtx.position.entryPrice != null
-    ) {
-      logState('LIVE SHORT opening from already-open paper position (SIM)', {
-        paperEntryPrice: paperShortCtx.position.entryPrice,
-        liveEntryPrice: currentPrice,
-        cumPnlTotal,
-        nowTs: now,
-      });
-      liveShortCtx.position.entryPrice = currentPrice;
-      // Open SHORT → SELL
-      openLiveShort(currentPrice);
-    }
-  }
-
-  // After processing this simulated tick, check for newly closed trades
-  checkForNewTrades();
-  recordMinuteHeartbeat(now);
+  processBtcTick(now, currentPrice);
 }, SIM_INTERVAL_MS);
 
 // --- Zerodha tick ingest (options) ---
@@ -1423,27 +1298,7 @@ app.post('/tick', (req, res) => {
 
   currentPrice = ltp;
   const now = Date.now();
-  runDailyResetIfNeeded(now);
-
-  const tick = {
-    symbolId: 'BTCUSD',
-    ltp: currentPrice,
-    ts: now,
-  };
-
-  applyBtcTrailingStopsBeforeTick(currentPrice);
-
-  onTick(paperLongCtx, tick);
-  onTick(paperShortCtx, tick);
-
-  syncBtcTrailingStateAfterTick();
-
-  onLiveTick(liveLongCtx, now);
-  onLiveTick(liveShortCtx, now);
-
-  // Manual tick can also close trades; capture any new ones
-  checkForNewTrades();
-  recordMinuteHeartbeat(now);
+  processBtcTick(now, currentPrice);
 
   return res.json({
     message: 'Tick processed',
