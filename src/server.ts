@@ -650,6 +650,48 @@ function processBtcTick(nowTs: number, ltp: number): void {
   }
 }
 
+function resetBtcForFeedModeSwitch(nowTs: number, reason: string): void {
+  logState('Resetting BTC state for feed-mode switch', {
+    reason,
+    nowTs,
+    currentPrice,
+    feedMode,
+  });
+
+  // Close any open paper positions at the current price so PnL is consistent.
+  if (paperLongCtx.position.isOpen && paperLongCtx.position.entryPrice != null) {
+    closePosition(paperLongCtx, currentPrice, nowTs);
+  }
+  if (paperShortCtx.position.isOpen && paperShortCtx.position.entryPrice != null) {
+    closePosition(paperShortCtx, currentPrice, nowTs);
+  }
+
+  // Close any open live positions and clear live entry prices to avoid price-scale mismatches.
+  if (liveLongCtx.position.isOpen) closeLiveLong(currentPrice);
+  if (liveShortCtx.position.isOpen) closeLiveShort(currentPrice);
+
+  liveLongCtx.state = LiveState.IDLE;
+  liveLongCtx.position.isOpen = false;
+  liveLongCtx.position.entryPrice = null;
+  liveLongCtx.position.openedAt = null;
+  liveLongCtx.lockUntilTs = undefined;
+
+  liveShortCtx.state = LiveState.IDLE;
+  liveShortCtx.position.isOpen = false;
+  liveShortCtx.position.entryPrice = null;
+  liveShortCtx.position.openedAt = null;
+  liveShortCtx.lockUntilTs = undefined;
+
+  liveLongEntryPrice = null;
+  liveShortEntryPrice = null;
+  btcLongTrailHigh = null;
+  btcShortTrailLow = null;
+
+  // Record any newly closed paper trades + a heartbeat snapshot for visibility.
+  checkForNewTrades();
+  recordMinuteHeartbeat(nowTs);
+}
+
 function checkForNewTrades(): void {
   // LONG side
   if (paperLongCtx.trades.length > lastLongTradeCount) {
@@ -993,7 +1035,12 @@ app.post('/feed-mode', (req, res) => {
     });
   }
 
+  // Prevent mixing SIM prices (e.g. 100/228) with DELTA prices (~86k) while positions are open.
+  if (mode !== feedMode) {
+    resetBtcForFeedModeSwitch(Date.now(), `feedMode ${feedMode} -> ${mode}`);
+  }
   feedMode = mode;
+  if (feedMode !== 'SIM') autoMode = 'PAUSE';
 
   return res.json({
     message: 'Feed mode updated',
@@ -1317,7 +1364,8 @@ app.post('/auto', (req, res) => {
     });
   }
 
-  if (typeof ltp === 'number' && !Number.isNaN(ltp)) {
+  // Only allow manual price set in SIM mode; in DELTA mode, currentPrice comes from Delta feed.
+  if (feedMode === 'SIM' && typeof ltp === 'number' && !Number.isNaN(ltp)) {
     currentPrice = ltp;
   }
 
