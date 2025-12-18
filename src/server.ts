@@ -328,6 +328,10 @@ let currentPrice = 100;
 const TICK_STEP = 0.5;
 const SIM_INTERVAL_MS = 1000;
 let lastBtcTickTs: number | null = null;
+let lastBtcMarketPrice: number | null = null;
+let lastBtcMarketTickTs: number | null = null;
+let lastBtcResetPrice: number | null = null;
+let lastBtcResetTs: number | null = null;
 
 // BTC paper trailing stop:
 // Keep initial FSM stop logic (savedLTP ± 0.5), then tighten stop once a position is open.
@@ -499,11 +503,57 @@ function logPnlSnapshot(snapshot: PnlSnapshot): void {
 let lastPnlMinuteKey: string | null = null;
 let lastPnlMinuteSnapshot: PnlSnapshot | null = null;
 
+function ensureLogsDir(): void {
+  if (!fs.existsSync('logs')) fs.mkdirSync('logs', { recursive: true });
+}
+
+function writeBtcResetCsvRow(params: {
+  kind: 'DAILY_RESET' | 'FEED_MODE_SWITCH';
+  tsMs: number;
+  reason: string;
+  feedMode: FeedMode;
+  currentPrice: number;
+  resetPrice: number;
+  marketPrice: number | null;
+  marketTickTs: number | null;
+}): void {
+  ensureLogsDir();
+
+  const istIso = new Date(params.tsMs + 5.5 * 60 * 60 * 1000).toISOString();
+  const datePart = istIso.slice(0, 10); // YYYY-MM-DD
+  const timePart = istIso.slice(11, 19); // HH:MM:SS
+
+  const filePath = path.join('logs', `btc-reset-${datePart}.csv`);
+  const header =
+    'timeIst,kind,reason,feedMode,currentPrice,resetPrice,marketPrice,marketTickTs\n';
+  if (!fs.existsSync(filePath)) fs.writeFileSync(filePath, header, 'utf8');
+
+  const reason = JSON.stringify(params.reason || '');
+  const marketPrice =
+    typeof params.marketPrice === 'number' && Number.isFinite(params.marketPrice)
+      ? params.marketPrice.toFixed(2)
+      : '';
+  const marketTickTs =
+    typeof params.marketTickTs === 'number' && Number.isFinite(params.marketTickTs)
+      ? String(params.marketTickTs)
+      : '';
+
+  const line =
+    `${datePart} ${timePart},` +
+    `${params.kind},` +
+    `${reason},` +
+    `${params.feedMode},` +
+    `${params.currentPrice.toFixed(2)},` +
+    `${params.resetPrice.toFixed(2)},` +
+    `${marketPrice},` +
+    `${marketTickTs}\n`;
+
+  fs.appendFileSync(filePath, line, 'utf8');
+}
+
 function writePnlCsvRow(snapshot: PnlSnapshot): void {
   // Ensure logs folder exists (fresh droplet installs, etc.)
-  if (!fs.existsSync('logs')) {
-    fs.mkdirSync('logs', { recursive: true });
-  }
+  ensureLogsDir();
 
   const istIso = snapshot.eventTsIst;
   const datePart = istIso.slice(0, 10); // YYYY-MM-DD
@@ -650,25 +700,49 @@ function processBtcTick(nowTs: number, ltp: number): void {
   }
 }
 
+function processBtcMarketTick(nowTs: number, ltp: number): void {
+  lastBtcMarketPrice = ltp;
+  lastBtcMarketTickTs = nowTs;
+  processBtcTick(nowTs, ltp);
+}
+
 function resetBtcForFeedModeSwitch(nowTs: number, reason: string): void {
+  const resetPrice = lastBtcMarketPrice ?? currentPrice;
+  lastBtcResetPrice = resetPrice;
+  lastBtcResetTs = nowTs;
+
+  writeBtcResetCsvRow({
+    kind: 'FEED_MODE_SWITCH',
+    tsMs: nowTs,
+    reason,
+    feedMode,
+    currentPrice,
+    resetPrice,
+    marketPrice: lastBtcMarketPrice,
+    marketTickTs: lastBtcMarketTickTs,
+  });
+
   logState('Resetting BTC state for feed-mode switch', {
     reason,
     nowTs,
     currentPrice,
+    resetPrice,
+    lastBtcMarketPrice,
+    lastBtcMarketTickTs,
     feedMode,
   });
 
   // Close any open paper positions at the current price so PnL is consistent.
   if (paperLongCtx.position.isOpen && paperLongCtx.position.entryPrice != null) {
-    closePosition(paperLongCtx, currentPrice, nowTs);
+    closePosition(paperLongCtx, resetPrice, nowTs);
   }
   if (paperShortCtx.position.isOpen && paperShortCtx.position.entryPrice != null) {
-    closePosition(paperShortCtx, currentPrice, nowTs);
+    closePosition(paperShortCtx, resetPrice, nowTs);
   }
 
   // Close any open live positions and clear live entry prices to avoid price-scale mismatches.
-  if (liveLongCtx.position.isOpen) closeLiveLong(currentPrice);
-  if (liveShortCtx.position.isOpen) closeLiveShort(currentPrice);
+  if (liveLongCtx.position.isOpen) closeLiveLong(resetPrice);
+  if (liveShortCtx.position.isOpen) closeLiveShort(resetPrice);
 
   liveLongCtx.state = LiveState.IDLE;
   liveLongCtx.position.isOpen = false;
@@ -764,6 +838,10 @@ function getStateSnapshot() {
     feedMode,
     currentPrice,
     lastBtcTickTs,
+    lastBtcMarketPrice,
+    lastBtcMarketTickTs,
+    lastBtcResetPrice,
+    lastBtcResetTs,
     autoMode,
 
     cumPnlTotal: getTotalCumPnl(),
@@ -807,28 +885,46 @@ function runDailyResetIfNeeded(nowUtcMs: number) {
     lastDailyResetIstDate = istDateKey;
     const nowTs = nowUtcMs;
 
+    const resetPrice = lastBtcMarketPrice ?? currentPrice;
+    lastBtcResetPrice = resetPrice;
+    lastBtcResetTs = nowTs;
+
+    writeBtcResetCsvRow({
+      kind: 'DAILY_RESET',
+      tsMs: nowTs,
+      reason: '05:30_IST',
+      feedMode,
+      currentPrice,
+      resetPrice,
+      marketPrice: lastBtcMarketPrice,
+      marketTickTs: lastBtcMarketTickTs,
+    });
+
     logState('Daily reset at 05:30 IST starting', {
       istDate: istDateKey,
       istTime: ist.toISOString(),
       currentPrice,
+      resetPrice,
+      lastBtcMarketPrice,
+      lastBtcMarketTickTs,
     });
 
     // Close any open paper positions at currentPrice
     if (paperLongCtx.position.isOpen && paperLongCtx.position.entryPrice != null) {
-      closePosition(paperLongCtx, currentPrice, nowTs);
+      closePosition(paperLongCtx, resetPrice, nowTs);
     }
     if (paperShortCtx.position.isOpen && paperShortCtx.position.entryPrice != null) {
-      closePosition(paperShortCtx, currentPrice, nowTs);
+      closePosition(paperShortCtx, resetPrice, nowTs);
     }
 
     // Close any open live positions and notify Bharath
     if (liveLongCtx.position.isOpen) {
       // Close live LONG → SELL
-      closeLiveLong(currentPrice);
+      closeLiveLong(resetPrice);
     }
     if (liveShortCtx.position.isOpen) {
       // Close live SHORT → BUY
-      closeLiveShort(currentPrice);
+      closeLiveShort(resetPrice);
     }
 
     // Log final PnL snapshot for the day
@@ -869,7 +965,7 @@ startDeltaFeed(
   (p) => {
     currentPrice = p;
   },
-  (p, nowTs) => processBtcTick(nowTs, p),
+  (p, nowTs) => processBtcMarketTick(nowTs, p),
   () => feedMode === 'DELTA',
 );
 
