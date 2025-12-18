@@ -760,6 +760,7 @@ function getStateSnapshot() {
   const liveShort = getLiveShortPnl();
 
   return {
+    serverNowTs: Date.now(),
     feedMode,
     currentPrice,
     lastBtcTickTs,

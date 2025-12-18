@@ -641,8 +641,12 @@
 
 	        const lastTickAgeEl = document.getElementById('lastTickAge');
 	        if (typeof state.lastBtcTickTs === 'number' && Number.isFinite(state.lastBtcTickTs)) {
-	          const ageMs = Math.max(0, Date.now() - state.lastBtcTickTs);
-	          lastTickAgeEl.textContent = `${ageMs}ms ago`;
+	          const nowTs =
+	            typeof state.serverNowTs === 'number' && Number.isFinite(state.serverNowTs)
+	              ? state.serverNowTs
+	              : Date.now();
+	          const ageMs = Math.max(0, nowTs - state.lastBtcTickTs);
+	          lastTickAgeEl.textContent = `${Math.round(ageMs)}ms ago`;
 	        } else {
 	          lastTickAgeEl.textContent = '-';
 	        }
