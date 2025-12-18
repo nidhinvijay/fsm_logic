@@ -30,7 +30,7 @@ import { OptionsRuntimeManager } from './optionsRuntime';
 import { loadOptionsHistory } from './optionsHistory';
 import { resolveZerodhaTick } from './zerodhaFeed';
 import { loadEnvOnce } from './loadEnv';
-import { captureWebhookSignal, captureZerodhaTick } from './captureLogger';
+import { captureDeltaTick, captureWebhookSignal, captureZerodhaTick } from './captureLogger';
 import { getOptionsExecutionState, setOptionsExecutionEnabled } from './optionsExecution';
 import { startDeltaFeed } from './deltaFeed';
 
@@ -703,6 +703,7 @@ function processBtcTick(nowTs: number, ltp: number): void {
 function processBtcMarketTick(nowTs: number, ltp: number): void {
   lastBtcMarketPrice = ltp;
   lastBtcMarketTickTs = nowTs;
+  captureDeltaTick({ tsMs: nowTs, symbolId: 'BTCUSD', ltp });
   processBtcTick(nowTs, ltp);
 }
 

@@ -42,6 +42,12 @@ function captureDir(): string | null {
   return dir.trim();
 }
 
+function parseBoolEnv(value: string | undefined): boolean {
+  const v = (value || '').trim().toLowerCase();
+  if (!v) return false;
+  return !(v === '0' || v === 'false' || v === 'no' || v === 'off');
+}
+
 export function captureWebhookSignal(params: {
   tsMs: number;
   contentType: string | undefined;
@@ -91,3 +97,30 @@ export function captureZerodhaTick(params: {
   });
 }
 
+let lastDeltaTickCaptureTs: number | null = null;
+
+export function captureDeltaTick(params: {
+  tsMs: number;
+  symbolId: string;
+  ltp: number;
+}): void {
+  const dir = captureDir();
+  if (!dir) return;
+  if (!parseBoolEnv(process.env.CAPTURE_DELTA_TICKS)) return;
+
+  const intervalMs = (() => {
+    const raw = Number(process.env.CAPTURE_DELTA_TICKS_INTERVAL_MS);
+    if (Number.isFinite(raw) && raw > 0) return raw;
+    return 500;
+  })();
+
+  if (lastDeltaTickCaptureTs != null && params.tsMs - lastDeltaTickCaptureTs < intervalMs) return;
+  lastDeltaTickCaptureTs = params.tsMs;
+
+  const { datePart, minuteKey } = minuteKeyIst(params.tsMs);
+  appendCsvRow({
+    filePath: path.join(dir, `delta-${datePart}.csv`),
+    header: 'timeIst,tsMs,symbolId,ltp',
+    cells: [minuteKey, params.tsMs, params.symbolId, params.ltp],
+  });
+}
