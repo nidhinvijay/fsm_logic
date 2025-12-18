@@ -1407,6 +1407,14 @@ app.post('/webhook', (req, res) => {
 
 // POST /tick  { ltp: number }  (optional manual tick, mainly for SIM mode)
 app.post('/tick', (req, res) => {
+  if (feedMode !== 'SIM') {
+    return res.status(400).json({
+      error: 'tick_only_allowed_in_sim_mode',
+      message: 'Manual /tick is only allowed when feedMode=SIM. Use POST /feed-mode first.',
+      feedMode,
+    });
+  }
+
   const { ltp } = req.body as { ltp?: number };
 
   if (typeof ltp !== 'number' || Number.isNaN(ltp)) {
